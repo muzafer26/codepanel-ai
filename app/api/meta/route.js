@@ -20,7 +20,12 @@ async function generateWithRetry(model, prompt, retries = 3, delay = 1500) {
 export async function POST(req) {
   const { security, performance, style, compliance, language } = await req.json();
 
-  const prompt = `You are a principal engineer. Four specialists reviewed this ${language} code. Synthesize their findings into one definitive review.
+  const prompt = `You are a principal architect. Four specialist agents reviewed this ${language} code.
+Analyze their logs and synthesize their findings into one definitive review.
+
+IMPORTANT CONFLICT RESOLUTION:
+Look for conflicting recommendations between agents (e.g. Performance Engineer recommending caching database objects to speed up latency, while Privacy Shield warns that caching objects containing PII is a severe compliance leak).
+You MUST reconcile these conflicts in your summary and provide a secure, compromise solution in the RECOMMENDED REFACTORED CODE (e.g., show how to cache only hashes or encrypted data, or separate PII data from cached metrics).
 
 SECURITY REPORT:
 ${security || "No security issues reported."}
@@ -39,12 +44,12 @@ Write the final verdict in this exact format:
 OVERALL SCORE: X/10
 
 EXECUTIVE SUMMARY:
-[2-3 sentences on the overall state of this code]
+[2-3 sentences summarizing the overall state of this code and any major agent conflicts you resolved]
 
 TOP ISSUES (deduplicated, ranked by severity):
-1. [CRITICAL/HIGH/MED/LOW] — Issue title — Brief explanation
-2. [severity] — Issue title — Brief explanation
-3. [severity] — Issue title — Brief explanation
+1. [CRITICAL/HIGH/MED/LOW] (Confidence: X%) — Issue title — Brief explanation
+2. [severity] (Confidence: X%) — Issue title — Brief explanation
+3. [severity] (Confidence: X%) — Issue title — Brief explanation
 (max 5 issues, no repetition)
 
 ONE THING DONE WELL:
@@ -55,7 +60,7 @@ VERDICT FOR DEVELOPER:
 
 RECOMMENDED REFACTORED CODE:
 \`\`\`${language}
-[Provide the complete corrected/improved code incorporating all fixes. Do not use placeholders inside this code block. Give the full code so it can be copied or shown in side-by-side diff view. Ensure this section is at the very end of your response, starting with RECOMMENDED REFACTORED CODE: followed by a code block.]
+[Provide the complete corrected/improved code incorporating all fixes and resolving the agent conflicts. Do not use placeholders. Give the full code so it can be copied or shown in side-by-side diff view. Ensure this section is at the very end of your response, starting with RECOMMENDED REFACTORED CODE: followed by a code block.]
 \`\`\``;
 
   const apiKey = process.env.GEMINI_API_KEY || "AIzaSyAQs6XpdIcd_5SFtavS0uQT-Hx3sUfNdDI";

@@ -92,6 +92,68 @@ const AGENTS = [
   { id: "compliance", name: "Privacy Shield", icon: "🛡", color: "#a855f7", dim: "rgba(168, 85, 247, 0.05)", border: "rgba(168, 85, 247, 0.25)", desc: "Detects HIPAA, PCI-DSS, and GDPR violations and maps PII leakage flow." },
 ];
 
+// Client-side Rule-based Static Scanner
+function runStaticScanner(code) {
+  const findings = [];
+  if (!code) return findings;
+  const lines = code.split('\n');
+
+  const rules = [
+    {
+      id: 'static-sqli',
+      severity: 'CRITICAL',
+      title: 'SQL Injection Vulnerability',
+      regex: /(select\s+.*\s+from|insert\s+into|update\s+.*set)\s+.*\s*\+\s*[a-zA-Z0-9_$]+/i,
+      desc: 'Direct string concatenation detected in a query. Exposed to parameter spoofing. Parameters should be parameterized.'
+    },
+    {
+      id: 'static-eval',
+      severity: 'CRITICAL',
+      title: 'Dangerous eval() Execution',
+      regex: /\beval\s*\(/i,
+      desc: 'The eval() call executes string parameters as code, introducing severe Remote Code Execution (RCE) exposure.'
+    },
+    {
+      id: 'static-secret',
+      severity: 'HIGH',
+      title: 'Hardcoded Cryptographic Secret',
+      regex: /(password|api_key|apikey|secret|token|client_secret|private_key)\s*=\s*['"][a-zA-Z0-9_\-]{6,}['"]/i,
+      desc: 'Plain text keys inside files are vulnerable to leaks. Transition secrets to server variables.'
+    },
+    {
+      id: 'static-log-pii',
+      severity: 'HIGH',
+      title: 'PII Log Exposure',
+      regex: /console\.(log|warn|error)\(.*\+.*\b(email|card|cvv|ssn|phone|password|secret|token)\b/i,
+      desc: 'Raw personal parameters exported to terminal logs. Encrypt or mask credentials before logging.'
+    },
+    {
+      id: 'static-unsecure-http',
+      severity: 'MEDIUM',
+      title: 'Unencrypted Transmission',
+      regex: /fetch\(\s*['"]http:\/\/[a-zA-Z0-9_\-\.]+/i,
+      desc: 'Transmitting sensitive variables via unencrypted HTTP protocols. Enforce HTTPS.'
+    }
+  ];
+
+  lines.forEach((lineText, idx) => {
+    rules.forEach(rule => {
+      if (rule.regex.test(lineText)) {
+        findings.push({
+          id: `${rule.id}-${idx}`,
+          severity: rule.severity,
+          title: rule.title,
+          line: idx + 1,
+          desc: rule.desc,
+          snippet: lineText.trim()
+        });
+      }
+    });
+  });
+
+  return findings;
+}
+
 function parsePrivacyFlow(code, reportText) {
   const nodes = [];
   const links = [];
@@ -105,7 +167,6 @@ function parsePrivacyFlow(code, reportText) {
   const detectedSinks = new Set();
   const detectedVariables = new Set();
 
-  // Extract identifiers and classify sources/sinks
   lines.forEach(line => {
     const words = line.match(/[a-zA-Z0-9_$]+/g) || [];
     words.forEach(word => {
@@ -124,7 +185,6 @@ function parsePrivacyFlow(code, reportText) {
       }
     });
 
-    // Capture compound expressions like console.log
     sinkKeywords.forEach(sinkKw => {
       if (line.includes(sinkKw)) {
         detectedSinks.add(sinkKw);
@@ -132,7 +192,6 @@ function parsePrivacyFlow(code, reportText) {
     });
   });
 
-  // Defaults if empty
   if (detectedSources.size === 0) {
     detectedSources.add('email');
     detectedSources.add('cardNumber');
@@ -158,7 +217,6 @@ function parsePrivacyFlow(code, reportText) {
 
   const isLeak = /leak|pii|gdpr|violation|logging|unencrypted|expose/i.test(reportText || "");
 
-  // Link variables co-occurring on same line
   sourceList.forEach(src => {
     let linked = false;
     lines.forEach(line => {
@@ -406,7 +464,7 @@ function PrivacyFlowCanvas({ code, reportText, status }) {
 
     return () => {
       window.removeEventListener('resize', handleResize);
-      canvas.removeEventListener('mousemove', handleMouseMove);
+      canvas.removeMouseMoveListener || canvas.removeEventListener('mousemove', handleMouseMove);
       cancelAnimationFrame(animationRef.current);
     };
   }, [code, status]);
@@ -430,14 +488,49 @@ function PrivacyFlowCanvas({ code, reportText, status }) {
   );
 }
 
-function calculateRisk(panels) {
-  const text = Object.values(panels).join("\n");
-  const criticals = (text.match(/\[VULN\]|\[LEAK\]|CRITICAL|🔴|severe|leak|compliance violation|gdpr/gi) || []).length;
-  const warnings = (text.match(/\[WARN\]|\[SLOW\]|\[SMELL\]|HIGH|🟡|warning|pii|exposure/gi) || []).length;
-  const lows = (text.match(/\[PASS\]|\[OK\]|\[GOOD\]|\[DEBT\]|\[SAFE\]|LOW|🟢|info|compliance|style/gi) || []).length;
-  
-  const score = Math.max(10, 100 - (criticals * 15 + warnings * 5 + lows * 2));
-  return { criticals, warnings, lows, score };
+// Enterprise dynamic score compiler
+function calculateMultiScoring(code, panels, staticFindings) {
+  let security = 100;
+  let privacy = 100;
+  let maintainability = 100;
+
+  staticFindings.forEach(f => {
+    if (f.severity === 'CRITICAL') {
+      security -= 22;
+      privacy -= 8;
+    } else if (f.severity === 'HIGH') {
+      security -= 14;
+      privacy -= 12;
+    } else if (f.severity === 'MEDIUM') {
+      security -= 6;
+      maintainability -= 10;
+    }
+  });
+
+  const secText = panels.security || "";
+  const perfText = panels.performance || "";
+  const styleText = panels.style || "";
+  const compText = panels.compliance || "";
+
+  const secVulnerabilities = (secText.match(/CRITICAL|\[VULN\]|🔴/g) || []).length;
+  const secWarnings = (secText.match(/HIGH|\[WARN\]|🟡/g) || []).length;
+  security -= (secVulnerabilities * 12 + secWarnings * 6);
+
+  const complianceLeaks = (compText.match(/CRITICAL|\[LEAK\]|\[GDPR\]|🔴/g) || []).length;
+  const complianceWarnings = (compText.match(/HIGH|\[PII\]|🟡/g) || []).length;
+  privacy -= (complianceLeaks * 14 + complianceWarnings * 7);
+
+  const styleSmells = (styleText.match(/HIGH|\[SMELL\]|\[DEBT\]|🔴/g) || []).length;
+  const latencyBottlenecks = (perfText.match(/SEVERE|\[SLOW\]|\[LEAK\]/g) || []).length;
+  maintainability -= (styleSmells * 8 + latencyBottlenecks * 6);
+
+  security = Math.max(10, Math.min(100, security));
+  privacy = Math.max(10, Math.min(100, privacy));
+  maintainability = Math.max(10, Math.min(100, maintainability));
+
+  const readiness = Math.round(security * 0.45 + privacy * 0.35 + maintainability * 0.20);
+
+  return { security, privacy, maintainability, readiness };
 }
 
 const extractFixedCode = (text) => {
@@ -490,6 +583,17 @@ export default function Page() {
   const [showDiff, setShowDiff] = useState(false);
   const [fixedCode, setFixedCode] = useState("");
 
+  // Scan History and Static Scan states
+  const [staticFindings, setStaticFindings] = useState([]);
+  const [history, setHistory] = useState([]);
+  const [showArchModal, setShowArchModal] = useState(false);
+
+  // Attack Exploit Simulator States
+  const [exploitLog, setExploitLog] = useState([]);
+  const [simulatingExploit, setSimulatingExploit] = useState(false);
+  const [exploitType, setExploitType] = useState(null); // "sqli" or "leak"
+
+  // Landing Page Interactive Simulation States
   const [simRunning, setSimRunning] = useState(false);
   const [simProgress, setSimProgress] = useState(0);
   const [simLogs, setSimLogs] = useState([]);
@@ -503,6 +607,24 @@ export default function Page() {
   };
   const metaRef = useRef(null);
 
+  // Load history from local storage
+  useEffect(() => {
+    const saved = localStorage.getItem("codepanel_scan_history");
+    if (saved) {
+      try { setHistory(JSON.parse(saved)); } catch (e) { console.error(e); }
+    }
+  }, []);
+
+  // Compute Static findings immediately upon code edits
+  useEffect(() => {
+    if (code.trim()) {
+      const findings = runStaticScanner(code);
+      setStaticFindings(findings);
+    } else {
+      setStaticFindings([]);
+    }
+  }, [code]);
+
   const reset = useCallback(() => {
     setPanels({ security: "", performance: "", style: "", compliance: "" });
     setStatus({ security: "idle", performance: "idle", style: "idle", compliance: "idle" });
@@ -512,6 +634,9 @@ export default function Page() {
     setExpandedPanel(null);
     setShowDiff(false);
     setFixedCode("");
+    setSimulatingExploit(false);
+    setExploitLog([]);
+    setExploitType(null);
   }, []);
 
   const runLandingSimulation = () => {
@@ -543,6 +668,44 @@ export default function Page() {
         setSimRunning(false);
       }
     }, 700);
+  };
+
+  // Exploit simulator trigger
+  const triggerExploitSimulation = (type) => {
+    setSimulatingExploit(true);
+    setExploitType(type);
+    setExploitLog([]);
+
+    const sqliSteps = [
+      "[*] Targeting local query endpoint...",
+      "[*] Injecting authentication bypass exploit payload: admin' OR '1'='1",
+      "[~] Query string compiled: SELECT * FROM users WHERE username = 'admin' OR '1'='1'",
+      "[!] Sending injection payload to database pipeline...",
+      "[+] EXPLOIT SUCCESS: Target query returns full rows dataset.",
+      "[+] Auth check bypassed. Logged in as administrator.",
+      "[+] Leaked token extracted: JWT_KEY_7437fa890987eaec"
+    ];
+
+    const leakSteps = [
+      "[*] Ingesting stdout container aggregate logs...",
+      "[*] Compiling regex for variables: card, cvv, secret...",
+      "[!] MATCH FOUND: 'Processing payment for user: tester@pci.com with card: 4111222233334444 CVV: 502'",
+      "[+] Capture successful: plaintext PII leaked to unmasked stdout log aggregates.",
+      "[!] PCI-DSS regulatory compliance violation confirmed.",
+      "[+] Leak path mapped: card -> console.log -> stdout aggregator."
+    ];
+
+    const targetSteps = type === "sqli" ? sqliSteps : leakSteps;
+    let idx = 0;
+
+    const interval = setInterval(() => {
+      if (idx < targetSteps.length) {
+        setExploitLog(prev => [...prev, targetSteps[idx]]);
+        idx++;
+      } else {
+        clearInterval(interval);
+      }
+    }, 600);
   };
 
   const startReview = useCallback(async () => {
@@ -626,6 +789,23 @@ export default function Page() {
         if (parsedFix) {
           setFixedCode(parsedFix);
         }
+
+        // Save metrics to history
+        const finalFindings = runStaticScanner(code);
+        const finalScores = calculateMultiScoring(code, results, finalFindings);
+        const nextScan = {
+          id: Date.now(),
+          timestamp: new Date().toLocaleTimeString(),
+          scores: finalScores,
+          language,
+          issues: finalFindings.length + (finalScores.readiness < 80 ? 2 : 0)
+        };
+        setHistory(prev => {
+          const updated = [nextScan, ...prev.slice(0, 4)];
+          localStorage.setItem("codepanel_scan_history", JSON.stringify(updated));
+          return updated;
+        });
+
       } catch (metaErr) {
         console.error("Meta reviewer failed:", metaErr);
         setMetaStatus("failed");
@@ -638,6 +818,7 @@ export default function Page() {
     }
   }, [code, language, reviewing, reset]);
 
+  // Keyboard Shortcuts Hook
   useEffect(() => {
     const handleKeyDown = (e) => {
       if (viewMode !== "console") return;
@@ -672,7 +853,14 @@ export default function Page() {
     return () => window.removeEventListener("keydown", handleKeyDown);
   }, [startReview, reset, fixedCode, viewMode]);
 
-  const risk = calculateRisk(panels);
+  const scores = calculateMultiScoring(code, panels, staticFindings);
+
+  const getDelta = (metric) => {
+    if (history.length < 2) return null;
+    const diff = history[0]?.scores?.[metric] - history[1]?.scores?.[metric];
+    if (isNaN(diff)) return null;
+    return diff;
+  };
 
   const styles = {
     landing: {
@@ -762,7 +950,7 @@ export default function Page() {
     return (
       <div style={styles.landing}>
         <style dangerouslySetInnerHTML={{ __html: `
-          @import url('https://fonts.googleapis.com/css2?family=Cousine:ital,wght=0,400;0,700;1,400;1,700&family=Inter:wght@400;500;700;900&display=swap');
+          @import url('https://fonts.googleapis.com/css2?family=Cousine:ital,wght@0,400;0,700;1,400;1,700&family=Inter:wght@400;500;700;900&display=swap');
           
           .cipher-grid-lines {
             background-image: 
@@ -839,11 +1027,14 @@ export default function Page() {
           </div>
           <div style={{ display: "flex", gap: 20, fontSize: 10, fontFamily: "'Cousine', monospace", color: "rgba(255,255,255,0.4)" }} className="hidden-y5lvp6">
             <span>[ SYSTEM: MONITORING ]</span>
-            <span>[ COMPLIANCE: GDPR ]</span>
-            <span>[ STACK: GEMINI_3.5 ]</span>
+            <span>[ PIPELINE: HYBRID_AST ]</span>
+            <span>[ DEPLOYED: CLOUD_ON ]</span>
           </div>
-          <div>
-            <button onClick={() => setViewMode("console")} className="btn-block-outline" style={{ ...styles.btn(false), padding: "8px 18px", fontSize: 9 }}>
+          <div style={{ display: "flex", gap: 10 }}>
+            <button onClick={() => setShowArchModal(true)} className="btn-block-outline" style={{ ...styles.btn(false), padding: "8px 18px", fontSize: 9 }}>
+              [ SYSTEM ARCHITECTURE ]
+            </button>
+            <button onClick={() => setViewMode("console")} className="btn-block-yellow" style={{ ...styles.btn(true), padding: "8px 18px", fontSize: 9 }}>
               [ INITIALIZE_CONSOLE ]
             </button>
           </div>
@@ -853,29 +1044,26 @@ export default function Page() {
         <div style={{ maxWidth: 1080, width: "100%", padding: "80px 24px 20px 24px", display: "flex", flexDirection: "column", alignItems: "center", textAlign: "center", zIndex: 2, boxSizing: "border-box" }}>
           
           <div style={{ display: "inline-flex", padding: "6px 14px", border: "1px solid #ffd900", borderRadius: 0, fontSize: 10, fontWeight: 700, color: "#ffd900", letterSpacing: "3px", textTransform: "uppercase", marginBottom: 28, background: "rgba(255, 217, 0, 0.04)", fontFamily: "'Cousine', monospace" }}>
-            [ APERTURE AGENTIC SHIELDING PIPELINE ]
+            [ HYBRID CODE COMPLIANCE & STATIC SHIELD ]
           </div>
           
           <h1 style={{ fontSize: "3.6rem", fontWeight: 900, margin: "0 0 18px 0", letterSpacing: "-1.8px", fontFamily: "'Inter', sans-serif", textTransform: "uppercase", lineHeight: 1.1, maxWidth: 880 }}>
-            Automated Audit Telemetry. <br />
-            <span style={{ color: "#ffd900" }}>Shielding Code Assets.</span>
+            AI-Powered Code Security <br />
+            <span style={{ color: "#ffd900" }}>& Compliance Review Platform</span>
           </h1>
           
           <p style={{ fontSize: 14.5, color: "#8b949e", lineHeight: 1.7, margin: "0 auto 36px auto", maxWidth: 680, fontFamily: "'Inter', sans-serif" }}>
-            An autonomous multi-agent analysis matrix that parses code structures, traces sensitive variables to leakage endpoints, and generates instant PCI-DSS/GDPR compliance telemetry logs.
+            A hybrid code analysis scanner combining client-side heuristics with multi-agent orchestration. Expose leaks instantly, simulate attacks, and trace security vulnerabilities to their origin.
           </p>
 
           <div style={{ display: "flex", gap: 12, justifyContent: "center", marginBottom: 64 }}>
             <button onClick={() => setViewMode("console")} className="btn-block-yellow"
               style={{ ...styles.btn(true), padding: "16px 36px", fontSize: 11 }}>
-              [ Launch Console Workspace ]
+              [ Ingest Source Code ]
             </button>
-            <button onClick={() => {
-              const el = document.getElementById("feature-anchor");
-              if (el) el.scrollIntoView({ behavior: "smooth" });
-            }} className="btn-block-outline"
+            <button onClick={() => setShowArchModal(true)} className="btn-block-outline"
               style={{ ...styles.btn(false), padding: "16px 36px", fontSize: 11 }}>
-              [ Explanatory Matrix ]
+              [ Recruiter Guide ]
             </button>
           </div>
         </div>
@@ -965,8 +1153,8 @@ export default function Page() {
         {/* Feature Bento Matrix */}
         <div id="feature-anchor" style={{ width: "100%", maxWidth: 1040, padding: "0 24px", boxSizing: "border-box", zIndex: 2 }}>
           <div style={{ display: "flex", justifyContent: "space-between", borderBottom: "1px solid rgba(255, 217, 0, 0.15)", paddingBottom: 16, marginBottom: 28 }}>
-            <span style={{ fontSize: 11, fontFamily: "'Cousine', monospace", color: "#ffd900", letterSpacing: "2.5px" }}>[ APERTURE AUTOMATED ENGINE SPECIFICATIONS ]</span>
-            <span style={{ fontSize: 9, fontFamily: "'Cousine', monospace", color: "rgba(255,255,255,0.3)" }}>// VERSION 1.4 // CLOUD SYNC</span>
+            <span style={{ fontSize: 11, fontFamily: "'Cousine', monospace", color: "#ffd900", letterSpacing: "2.5px" }}>[ SYSTEM SECURITY SPECIFICATIONS ]</span>
+            <span style={{ fontSize: 9, fontFamily: "'Cousine', monospace", color: "rgba(255,255,255,0.3)" }}>// ENTERPRISE PIPELINE // ACTIVE</span>
           </div>
 
           <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))", gap: 16 }}>
@@ -974,9 +1162,9 @@ export default function Page() {
             <div className="feature-cell">
               <CornerCrosses />
               <div style={{ fontSize: 24, fontWeight: 900, color: "#ffd900", fontFamily: "'Cousine', monospace", marginBottom: 12 }}>01 //</div>
-              <h3 style={{ fontSize: 12, fontWeight: 900, color: "#ffffff", letterSpacing: "1.5px", fontFamily: "'Cousine', monospace", marginBottom: 8 }}>SECURITY AUDITOR</h3>
+              <h3 style={{ fontSize: 12, fontWeight: 900, color: "#ffffff", letterSpacing: "1.5px", fontFamily: "'Cousine', monospace", marginBottom: 8 }}>SECURITY CORE</h3>
               <p style={{ fontSize: 11.5, color: "#8b949e", lineHeight: 1.6, marginBottom: 14 }}>
-                Scans structural representations to pinpoint OWASP Top 10 breaches, unencrypted variables, and hardcoded system access credentials.
+                Paranoid analysis scanning code syntax for OWASP violations, raw parameters concatenation, and credential leak risks.
               </p>
               <div style={{ fontSize: 9, fontFamily: "'Cousine', monospace", color: "#ff4d6d", display: "flex", alignItems: "center", gap: 6 }}>
                 <span style={{ animation: "blink 1s step-end infinite" }}>●</span> VULN SCAN ACTIVE
@@ -988,7 +1176,7 @@ export default function Page() {
               <div style={{ fontSize: 24, fontWeight: 900, color: "#ffd900", fontFamily: "'Cousine', monospace", marginBottom: 12 }}>02 //</div>
               <h3 style={{ fontSize: 12, fontWeight: 900, color: "#ffffff", letterSpacing: "1.5px", fontFamily: "'Cousine', monospace", marginBottom: 8 }}>LATENCY ENG</h3>
               <p style={{ fontSize: 11.5, color: "#8b949e", lineHeight: 1.6, marginBottom: 14 }}>
-                Exposes query bottleneck patterns, unclosed memory buffers, complex loops, and execution-blocking asynchronous nodes.
+                Exposes resource locks, redundant query operations, O(N²) loops, and missing database cache policies.
               </p>
               <div style={{ width: "100%", padding: "4px 0" }}>
                 <svg viewBox="0 0 100 20" style={{ width: "100%", height: 16 }}>
@@ -1002,7 +1190,7 @@ export default function Page() {
               <div style={{ fontSize: 24, fontWeight: 900, color: "#ffd900", fontFamily: "'Cousine', monospace", marginBottom: 12 }}>03 //</div>
               <h3 style={{ fontSize: 12, fontWeight: 900, color: "#ffffff", letterSpacing: "1.5px", fontFamily: "'Cousine', monospace", marginBottom: 8 }}>QUALITY COMPILER</h3>
               <p style={{ fontSize: 11.5, color: "#8b949e", lineHeight: 1.6, marginBottom: 14 }}>
-                Ingests files for structural code smells, DRY validation compliance, and alignment to functional SOLID design patterns.
+                Reviews structural formatting, DRY parameters duplication, clean class design, and SOLID code standards.
               </p>
               <div style={{ fontSize: 8.5, fontFamily: "'Cousine', monospace", color: "#06d6a0" }}>
                 // SOLID RATING: EXCELLENT
@@ -1014,7 +1202,7 @@ export default function Page() {
               <div style={{ fontSize: 24, fontWeight: 900, color: "#ffd900", fontFamily: "'Cousine', monospace", marginBottom: 12 }}>04 //</div>
               <h3 style={{ fontSize: 12, fontWeight: 900, color: "#ffffff", letterSpacing: "1.5px", fontFamily: "'Cousine', monospace", marginBottom: 8 }}>PRIVACY SHIELD</h3>
               <p style={{ fontSize: 11.5, color: "#8b949e", lineHeight: 1.6, marginBottom: 14 }}>
-                Audits variables handling PII against GDPR, HIPAA, and PCI rules. Generates telemetry nodes mapped to insecure logging sinks.
+                Ensures regulatory compliance (GDPR, PCI-DSS) by mapping variables flows and warning against caching unencrypted credentials.
               </p>
               <div style={{ display: "flex", gap: 6, fontSize: 8, fontFamily: "'Cousine', monospace" }}>
                 <span style={{ padding: "1px 5px", background: "rgba(168, 85, 247, 0.15)", border: "1px solid #a855f7", color: "#a855f7" }}>PCI-DSS</span>
@@ -1024,6 +1212,46 @@ export default function Page() {
 
           </div>
         </div>
+
+        {/* Recruiter System Architecture Modal */}
+        {showArchModal && (
+          <div style={{ position: "fixed", top: 0, left: 0, right: 0, bottom: 0, background: "rgba(0,0,0,0.85)", zIndex: 1000, display: "flex", alignItems: "center", justifyContent: "center", padding: 20 }}>
+            <div style={{ background: "#000000", border: "1px solid #ffd900", padding: 32, maxWidth: 840, width: "100%", position: "relative", fontFamily: "'Inter', sans-serif" }}>
+              <CornerCrosses />
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", borderBottom: "1px solid rgba(255, 217, 0, 0.2)", paddingBottom: 16, marginBottom: 24 }}>
+                <span style={{ fontSize: 11, color: "#ffd900", fontFamily: "'Cousine', monospace", letterSpacing: "2.5px" }}>[ HYBRID SYSTEM ARCHITECTURE EXPLORER ]</span>
+                <button onClick={() => setShowArchModal(false)} style={{ background: "none", border: "none", color: "#ffd900", cursor: "pointer", fontSize: 10, fontFamily: "'Cousine', monospace" }}>✕ CLOSE</button>
+              </div>
+
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 20, fontSize: 12, lineHeight: 1.6 }} className="hidden-y5lvp6">
+                <div>
+                  <h4 style={{ color: "#ffd900", fontSize: 11, fontFamily: "'Cousine', monospace", margin: "0 0 10px 0" }}>01 / HYBRID PIPELINE FLOW</h4>
+                  <p style={{ color: "#8b949e", margin: "0 0 16px 0" }}>
+                    Source code ingestion runs client-side rule heuristic scanning instantly (0ms). Detected errors are displayed dynamically. Then, staggered parameters are forwarded to parallel LLM execution matrices.
+                  </p>
+                  <h4 style={{ color: "#ffd900", fontSize: 11, fontFamily: "'Cousine', monospace", margin: "0 0 10px 0" }}>02 / ORCHESTRATION & DIVERGENCE</h4>
+                  <p style={{ color: "#8b949e", margin: 0 }}>
+                    Agents run distinct persona configs. Performance Engineer advocates database caches to accelerate queries, while Privacy Shield flags cleartext caching as a PCI/GDPR breach. The Meta reviewer synthesizes and resolves this clash.
+                  </p>
+                </div>
+                <div>
+                  <h4 style={{ color: "#ffd900", fontSize: 11, fontFamily: "'Cousine', monospace", margin: "0 0 10px 0" }}>03 / DYNAMIC VARIABLE TELEMETRY</h4>
+                  <p style={{ color: "#8b949e", margin: "0 0 16px 0" }}>
+                    The Privacy Flow Canvas runs an AST-like string parser to isolate variables and identify logging/network sinks. It creates logical node connections dynamically, rendering unsafe paths red during compliance violations.
+                  </p>
+                  <h4 style={{ color: "#ffd900", fontSize: 11, fontFamily: "'Cousine', monospace", margin: "0 0 10px 0" }}>04 / PERSISTENT SCORE TELEMETRY</h4>
+                  <p style={{ color: "#8b949e", margin: 0 }}>
+                    Calculates separate indices for Security, Privacy, and Code Debt, comparing them to previous runs saved in localStorage to display improvement trends.
+                  </p>
+                </div>
+              </div>
+              
+              <div style={{ marginTop: 24, borderTop: "1px dashed rgba(255,255,255,0.1)", paddingTop: 16, fontSize: 10, fontFamily: "'Cousine', monospace", color: "rgba(255,255,255,0.4)" }}>
+                // ENGINE: GEMINI_3.5_FLASH // BROKER RETRIES: EXPONENTIAL BACKOFF ACTIVE
+              </div>
+            </div>
+          </div>
+        )}
 
       </div>
     );
@@ -1066,8 +1294,8 @@ export default function Page() {
         </div>
         
         <div style={{ display: "flex", gap: 16, alignItems: "center" }} className="hidden-y5lvp6">
-          <span style={{ fontSize: 8.5, fontFamily: "'Cousine', monospace", color: "rgba(255,255,255,0.3)" }}>// NODE: APERTURE-US-01</span>
-          <span style={{ fontSize: 8.5, fontFamily: "'Cousine', monospace", color: "rgba(255,255,255,0.3)" }}>// PORT: 3002 // OK</span>
+          <span style={{ fontSize: 8.5, fontFamily: "'Cousine', monospace", color: "rgba(255,255,255,0.3)" }}>// PIPELINE: HYBRID_AST</span>
+          <span style={{ fontSize: 8.5, fontFamily: "'Cousine', monospace", color: "rgba(255,255,255,0.3)" }}>// ENGINE: GEMINI_3.5</span>
         </div>
 
         <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
@@ -1087,7 +1315,7 @@ export default function Page() {
         {/* Master Bento Layout Columns */}
         <div className="cipher-dashboard-grid">
           
-          {/* LEFT SECTION */}
+          {/* LEFT SECTION: Editor, static scans, and agent terminals */}
           <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
             
             {/* Input Editor Box */}
@@ -1113,7 +1341,7 @@ export default function Page() {
               </div>
 
               <div style={{ display: "flex", background: "#000000", borderBottom: "1px solid rgba(255, 217, 0, 0.15)", minHeight: 200 }}>
-                {/* Gutter Line Numbers */}
+                {/* Line Numbers */}
                 <div style={{
                   width: 32,
                   borderRight: "1px solid rgba(255, 217, 0, 0.12)",
@@ -1138,7 +1366,7 @@ export default function Page() {
 
               <div style={{ padding: "10px 16px", borderTop: "none", display: "flex", gap: 10, alignItems: "center", background: "#050505" }}>
                 <button onClick={startReview} disabled={!code.trim() || reviewing} className="btn-block-yellow"
-                  style={{ ...styles.btn(true), opacity: !code.trim() || reviewing ? 0.5 : 1, cursor: !code.trim() || reviewing ? "not-allowed" : "pointer" }}>
+                  style={{ ...styles.btn(primary => true), opacity: !code.trim() || reviewing ? 0.5 : 1, cursor: !code.trim() || reviewing ? "not-allowed" : "pointer" }}>
                   {reviewing ? "[ RUNNING AUDIT PIPELINE... ]" : "[ EXECUTE AGENT MATRIX ]"}
                 </button>
                 
@@ -1149,6 +1377,41 @@ export default function Page() {
                 {error && <span style={{ fontSize: 9.5, color: "#ff4d6d", fontWeight: 700, letterSpacing: "1px", fontFamily: "'Cousine', monospace" }}>[CRITICAL_ERR] {error}</span>}
               </div>
             </div>
+
+            {/* Instant Static Scanner Results Panel */}
+            {staticFindings.length > 0 && (
+              <div style={{ ...styles.card, padding: 16, background: "#050000", border: "1px solid rgba(255, 77, 109, 0.4)" }}>
+                <CornerCrosses />
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
+                  <span style={{ fontSize: 9, color: "#ff4d6d", letterSpacing: "2.5px", fontWeight: 700, fontFamily: "'Cousine', monospace" }}>
+                    [ HEURISTICS PRE-SCAN EXPOSURE DETECTED (0ms) ]
+                  </span>
+                  <div style={{ display: "flex", gap: 8 }}>
+                    {staticFindings.some(f => f.severity === 'CRITICAL' || f.title.includes("SQL")) && (
+                      <button onClick={() => triggerExploitSimulation(staticFindings.some(f => f.title.includes("SQL")) ? "sqli" : "leak")}
+                        style={{ ...styles.btn(true), background: "#ff4d6d", border: "none", padding: "4px 10px", fontSize: 8, color: "#ffffff" }}>
+                        [ SIMULATE EXPLOIT ATTACK ]
+                      </button>
+                    )}
+                  </div>
+                </div>
+
+                <div style={{ display: "flex", flexDirection: "column", gap: 10, fontFamily: "'Cousine', monospace", fontSize: 10.5 }}>
+                  {staticFindings.map((f, i) => (
+                    <div key={i} style={{ borderBottom: i < staticFindings.length - 1 ? "1px dashed rgba(255, 77, 109, 0.15)" : "none", paddingBottom: 8 }}>
+                      <div style={{ display: "flex", justifyContent: "space-between", color: f.severity === 'CRITICAL' ? '#ff4d6d' : '#ffd166', fontWeight: 700 }}>
+                        <span>● {f.title} (Line {f.line})</span>
+                        <span>{f.severity} // 92% CONFIDENCE</span>
+                      </div>
+                      <div style={{ color: "#8b949e", margin: "4px 0" }}>{f.desc}</div>
+                      <div style={{ background: "#0c0204", padding: "4px 8px", color: "#ff4d6d", fontSize: 9.5, borderLeft: "2px solid #ff4d6d" }}>
+                        <code>{f.snippet}</code>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
 
             {/* Staggered Agent Terminals */}
             <div style={{ display: "grid", gridTemplateColumns: expandedPanel ? "1fr" : "1fr 1fr", gap: 16 }}>
@@ -1241,53 +1504,104 @@ export default function Page() {
 
           </div>
 
-          {/* RIGHT SECTION */}
+          {/* RIGHT SECTION: Multi-scoring, canvas, history and meta reviewer */}
           <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
             
-            {/* Live Triage Diagnostics */}
-            {(Object.values(status).some(s => s !== "idle") || meta) && (
+            {/* Multi-Dimensional scoring index */}
+            {(Object.values(status).some(s => s !== "idle") || meta || staticFindings.length > 0) && (
               <div style={{ ...styles.card, padding: 16, background: "#000000" }}>
                 <CornerCrosses />
                 <div style={{ display: "flex", justifySpace: "space-between", justifyContent: "space-between", alignItems: "center", marginBottom: 14 }}>
-                  <span style={{ fontSize: 9, color: "#ffd900", letterSpacing: "2.5px", fontWeight: 700, fontFamily: "'Cousine', monospace" }}>[ APERTURE_HEALTH_DIAGNOSTICS ]</span>
-                  <span style={{ fontSize: 8.5, color: "rgba(255,255,255,0.3)", fontFamily: "'Cousine', monospace" }}>// LIVE_METRIC</span>
+                  <span style={{ fontSize: 9, color: "#ffd900", letterSpacing: "2.5px", fontWeight: 700, fontFamily: "'Cousine', monospace" }}>
+                    [ ANALYSIS_TELEMETRY_INDICES ]
+                  </span>
+                  <span style={{ fontSize: 8.5, color: "rgba(255,255,255,0.3)", fontFamily: "'Cousine', monospace" }}>
+                    // STICKER: ACTIVE
+                  </span>
                 </div>
 
-                <div style={{ display: "flex", alignItems: "center", gap: 24 }}>
-                  <div style={{ position: "relative", width: 96, height: 96 }}>
-                    <svg width="96" height="96" viewBox="0 0 96 96" style={{ transform: "rotate(-90deg)" }}>
-                      <circle cx="48" cy="48" r="40" fill="transparent" stroke="rgba(255, 217, 0, 0.05)" strokeWidth="6" />
-                      <circle cx="48" cy="48" r="40" fill="transparent"
-                        stroke={risk.score > 80 ? "#06d6a0" : risk.score > 50 ? "#ffd166" : "#ff4d6d"}
-                        strokeWidth="6"
-                        strokeDasharray={2 * Math.PI * 40}
-                        strokeDashoffset={(2 * Math.PI * 40) - (risk.score / 100) * (2 * Math.PI * 40)}
+                <div style={{ display: "flex", gap: 20, alignItems: "center" }}>
+                  <div style={{ position: "relative", width: 84, height: 84 }}>
+                    <svg width="84" height="84" viewBox="0 0 84 84" style={{ transform: "rotate(-90deg)" }}>
+                      <circle cx="42" cy="42" r="36" fill="transparent" stroke="rgba(255, 217, 0, 0.04)" strokeWidth="5" />
+                      <circle cx="42" cy="42" r="36" fill="transparent"
+                        stroke={scores.readiness > 80 ? "#06d6a0" : scores.readiness > 50 ? "#ffd166" : "#ff4d6d"}
+                        strokeWidth="5"
+                        strokeDasharray={2 * Math.PI * 36}
+                        strokeDashoffset={(2 * Math.PI * 36) - (scores.readiness / 100) * (2 * Math.PI * 36)}
                         strokeLinecap="square"
-                        style={{ transition: "stroke-dashoffset 0.4s ease, stroke 0.4s" }}
+                        style={{ transition: "stroke-dashoffset 0.4s ease" }}
                       />
                     </svg>
-                    <div style={{ position: "absolute", top: 0, left: 0, right: 0, bottom: 0, display: "flex", flexDirection: "column", alignItems: "center", justifyItems: "center", justifyContent: "center", fontFamily: "'Cousine', monospace" }}>
-                      <span style={{ fontSize: 16, fontWeight: 900, color: "#ffffff" }}>{risk.score}%</span>
-                      <span style={{ fontSize: 6.5, color: "rgba(255,255,255,0.4)", letterSpacing: "1px" }}>SCORE</span>
+                    <div style={{ position: "absolute", top: 0, left: 0, right: 0, bottom: 0, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", fontFamily: "'Cousine', monospace" }}>
+                      <span style={{ fontSize: 14, fontWeight: 900, color: "#ffffff" }}>{scores.readiness}%</span>
+                      <span style={{ fontSize: 6, color: "rgba(255,255,255,0.4)", letterSpacing: "0.5px" }}>DEPLOY</span>
                     </div>
                   </div>
 
-                  <div style={{ flex: 1, display: "flex", flexDirection: "column", gap: 6, fontSize: 9, fontFamily: "'Cousine', monospace" }}>
-                    <div style={{ display: "flex", justifySpace: "space-between", justifyContent: "space-between", borderBottom: "1px dashed rgba(255,255,255,0.06)", paddingBottom: 4 }}>
-                      <span style={{ color: "#ff4d6d" }}>● CRITICAL VULNS</span>
-                      <span style={{ color: "#ffffff", fontWeight: 700 }}>{risk.criticals}</span>
+                  <div style={{ flex: 1, display: "flex", flexDirection: "column", gap: 5, fontSize: 9.5, fontFamily: "'Cousine', monospace" }}>
+                    {/* Security metric */}
+                    <div>
+                      <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 2 }}>
+                        <span>SECURITY INDEX</span>
+                        <span style={{ color: scores.security > 80 ? "#06d6a0" : "#ff4d6d" }}>
+                          {scores.security}% {getDelta('security') !== null && (getDelta('security') >= 0 ? `(+${getDelta('security')}%)` : `(${getDelta('security')}%)`)}
+                        </span>
+                      </div>
+                      <div style={{ height: 3, background: "rgba(255,255,255,0.05)" }}>
+                        <div style={{ height: "100%", width: `${scores.security}%`, background: "#ff4d6d", transition: "width 0.3s" }} />
+                      </div>
                     </div>
-                    <div style={{ display: "flex", justifySpace: "space-between", justifyContent: "space-between", borderBottom: "1px dashed rgba(255,255,255,0.06)", paddingBottom: 4 }}>
-                      <span style={{ color: "#ffd166" }}>● COMPLIANCE RISKS</span>
-                      <span style={{ color: "#ffffff", fontWeight: 700 }}>{risk.warnings}</span>
+
+                    {/* Privacy metric */}
+                    <div>
+                      <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 2 }}>
+                        <span>PRIVACY ALIGNMENT</span>
+                        <span style={{ color: scores.privacy > 80 ? "#06d6a0" : "#a855f7" }}>
+                          {scores.privacy}% {getDelta('privacy') !== null && (getDelta('privacy') >= 0 ? `(+${getDelta('privacy')}%)` : `(${getDelta('privacy')}%)`)}
+                        </span>
+                      </div>
+                      <div style={{ height: 3, background: "rgba(255,255,255,0.05)" }}>
+                        <div style={{ height: "100%", width: `${scores.privacy}%`, background: "#a855f7", transition: "width 0.3s" }} />
+                      </div>
                     </div>
-                    <div style={{ display: "flex", justifySpace: "space-between", justifyContent: "space-between", borderBottom: "1px dashed rgba(255,255,255,0.06)", paddingBottom: 4 }}>
-                      <span style={{ color: "#06d6a0" }}>● CODE SMELL SMELLS</span>
-                      <span style={{ color: "#ffffff", fontWeight: 700 }}>{risk.lows}</span>
+
+                    {/* Quality metric */}
+                    <div>
+                      <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 2 }}>
+                        <span>CODE MAINTAINABILITY</span>
+                        <span style={{ color: scores.maintainability > 80 ? "#06d6a0" : "#ffd166" }}>
+                          {scores.maintainability}% {getDelta('maintainability') !== null && (getDelta('maintainability') >= 0 ? `(+${getDelta('maintainability')}%)` : `(${getDelta('maintainability')}%)`)}
+                        </span>
+                      </div>
+                      <div style={{ height: 3, background: "rgba(255,255,255,0.05)" }}>
+                        <div style={{ height: "100%", width: `${scores.maintainability}%`, background: "#06d6a0", transition: "width 0.3s" }} />
+                      </div>
                     </div>
                   </div>
                 </div>
 
+              </div>
+            )}
+
+            {/* Active Hacking Exploit Simulator Drawer */}
+            {simulatingExploit && (
+              <div style={{ ...styles.card, padding: 16, background: "#060303", border: "1px solid #ff4d6d" }}>
+                <CornerCrosses />
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10, borderBottom: "1px solid rgba(255, 77, 109, 0.2)", paddingBottom: 6 }}>
+                  <span style={{ fontSize: 9, color: "#ff4d6d", letterSpacing: "2px", fontWeight: 700, fontFamily: "'Cousine', monospace" }}>
+                    [ EXPLOIT PATH ATTACK VECTOR SIMULATOR ]
+                  </span>
+                  <button onClick={() => setSimulatingExploit(false)} style={{ background: "none", border: "none", color: "#ff4d6d", cursor: "pointer", fontSize: 9, fontFamily: "'Cousine', monospace" }}>✕ CLOSE</button>
+                </div>
+                <div style={{ display: "flex", flexDirection: "column", gap: 6, fontFamily: "'Cousine', monospace", fontSize: 10, color: "#ffffff", lineHeight: 1.6 }}>
+                  {exploitLog.map((log, i) => (
+                    <div key={i} style={{ color: log.includes("SUCCESS") || log.includes("MATCH") ? "#ff4d6d" : "#8b949e" }}>
+                      {log}
+                    </div>
+                  ))}
+                  {exploitLog.length < 5 && <span style={{ display: "inline-block", width: 6, height: 11, background: "#ff4d6d", animation: "blink 1s step-end infinite" }} />}
+                </div>
               </div>
             )}
 
@@ -1297,7 +1611,7 @@ export default function Page() {
               <PrivacyFlowCanvas code={code} reportText={panels.compliance} status={status.compliance} />
             </div>
 
-            {/* Meta Synthesizer */}
+            {/* Meta Synthesizer Verdict */}
             {metaStatus !== "idle" && (
               <div style={{ ...styles.card, border: `1px solid ${metaStatus === "done" ? "#ffd900" : (metaStatus === "failed" ? "#ff4d6d" : "rgba(255, 217, 0, 0.15)")}`, transition: "border-color 0.5s" }}>
                 <CornerCrosses />
@@ -1313,7 +1627,7 @@ export default function Page() {
                   </span>
                 </div>
                 
-                <div ref={metaRef} style={{ padding: 16, fontSize: 11, lineHeight: 1.8, color: metaStatus === "failed" ? "#ff4d6d" : "#ffffff", whiteSpace: "pre-wrap", wordBreak: "break-word", maxHeight: 250, overflowY: "auto", fontFamily: "'JetBrains Mono', monospace" }}>
+                <div ref={metaRef} style={{ padding: 16, fontSize: 11, lineHeight: 1.8, color: metaStatus === "failed" ? "#ff4d6d" : "#ffffff", whiteSpace: "pre-wrap", wordBreak: "break-word", maxHeight: 230, overflowY: "auto", fontFamily: "'JetBrains Mono', monospace" }}>
                   {meta}
                   {metaStatus === "synthesizing" && <span style={{ display: "inline-block", width: 6, height: 11, background: "#ffd900", marginLeft: 2, animation: "blink 1s step-end infinite", verticalAlign: "middle" }} />}
                 </div>
@@ -1335,6 +1649,26 @@ export default function Page() {
               </div>
             )}
 
+            {/* Local Storage Scans History Log */}
+            {history.length > 0 && (
+              <div style={{ ...styles.card, padding: 16, background: "#000000" }}>
+                <CornerCrosses />
+                <div style={{ fontSize: 9, color: "#ffd900", letterSpacing: "2.5px", fontWeight: 700, fontFamily: "'Cousine', monospace", marginBottom: 12 }}>
+                  [ SCANS HISTORY MEMORY (LOCAL) ]
+                </div>
+                <div style={{ display: "flex", flexDirection: "column", gap: 8, fontSize: 10, fontFamily: "'Cousine', monospace" }}>
+                  {history.map((h, i) => (
+                    <div key={h.id} style={{ display: "flex", justifyContent: "space-between", borderBottom: i < history.length - 1 ? "1px solid rgba(255,255,255,0.05)" : "none", paddingBottom: 6 }}>
+                      <span style={{ color: "#ffffff" }}>#{history.length - i} [{h.timestamp}] ({h.language})</span>
+                      <span style={{ color: h.scores.readiness > 80 ? "#06d6a0" : "#ff4d6d" }}>
+                        Readiness: {h.scores.readiness}% ({h.issues} issues)
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+
           </div>
 
         </div>
@@ -1346,10 +1680,10 @@ export default function Page() {
         <span style={{ fontWeight: 800, color: "#ffd900", fontFamily: "'Cousine', monospace" }}>[ CLI SHORTCUTS ]</span>
         <span>RUN: ^ENTER</span>
         <span>RESET: ESC</span>
-        <span>MAXIMIZE PANEL: 1-4 KEYS</span>
-        <span>DIFF COMPARISON: CTRL+D</span>
+        <span>MAXIMIZE: 1-4 KEYS</span>
+        <span>DIFF: CTRL+D</span>
         <span style={{ marginLeft: "auto", color: reviewing ? "#ffd900" : "#06d6a0", fontWeight: 700, fontFamily: "'Cousine', monospace" }}>
-          ● STATUS: {reviewing ? "ACQUIRING REMOTE CLOUD DATA..." : "CONSOLE TELEMETRY PIPELINE ONLINE"}
+          ● PIPELINE STATUS: {reviewing ? "PARALLEL LLM AGENTS RUNNING..." : "HYBRID HEURISTICS & REASONING ONLINE"}
         </span>
       </div>
     </div>
