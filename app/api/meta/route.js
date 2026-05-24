@@ -63,34 +63,105 @@ RECOMMENDED REFACTORED CODE:
 [Provide the complete corrected/improved code incorporating all fixes and resolving the agent conflicts. Do not use placeholders. Give the full code so it can be copied or shown in side-by-side diff view. Ensure this section is at the very end of your response, starting with RECOMMENDED REFACTORED CODE: followed by a code block.]
 \`\`\``;
 
-  const apiKey = process.env.GEMINI_API_KEY || "AIzaSyAQs6XpdIcd_5SFtavS0uQT-Hx3sUfNdDI";
-  const genAI = new GoogleGenerativeAI(apiKey);
+  const apiKey = process.env.GROQ_API_KEY || process.env.GEMINI_API_KEY;
 
-  const stream = new ReadableStream({
-    async start(controller) {
-      try {
-        const model = genAI.getGenerativeModel({ model: "gemini-3.5-flash" });
-        const result = await generateWithRetry(model, prompt);
+  if (!apiKey) {
+    return new Response(JSON.stringify({ error: "Missing API Key. Please configure GEMINI_API_KEY or GROQ_API_KEY in your environment." }), { status: 500 });
+  }
 
-        for await (const chunk of result.stream) {
-          const text = chunk.text();
-          if (text) {
-            controller.enqueue(new TextEncoder().encode(text));
+  if (apiKey.startsWith("gsk_")) {
+    const stream = new ReadableStream({
+      async start(controller) {
+        try {
+          const res = await fetch("https://api.groq.com/openai/v1/chat/completions", {
+            method: "POST",
+            headers: {
+              "Authorization": `Bearer ${apiKey}`,
+              "Content-Type": "application/json"
+            },
+            body: JSON.stringify({
+              model: "llama-3.3-70b-specdec",
+              messages: [{ role: "user", content: prompt }],
+              stream: true
+            })
+          });
+
+          if (!res.ok) {
+            const errText = await res.text();
+            throw new Error(`Groq API returned ${res.status}: ${errText}`);
           }
-        }
-      } catch (error) {
-        controller.enqueue(new TextEncoder().encode(`\n\n[API_ERROR] ${error.message || "Unknown meta synthesis error"}`));
-      } finally {
-        controller.close();
-      }
-    },
-  });
 
-  return new Response(stream, {
-    headers: {
-      "Content-Type": "text/plain; charset=utf-8",
-      "Transfer-Encoding": "chunked",
-      "Cache-Control": "no-cache",
-    },
-  });
+          const reader = res.body.getReader();
+          const decoder = new TextDecoder();
+          let buffer = "";
+
+          while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            buffer += decoder.decode(value, { stream: true });
+            const lines = buffer.split("\n");
+            buffer = lines.pop() || "";
+
+            for (const line of lines) {
+              const trimmed = line.trim();
+              if (!trimmed) continue;
+              if (trimmed === "data: [DONE]") continue;
+              if (trimmed.startsWith("data: ")) {
+                try {
+                  const json = JSON.parse(trimmed.substring(6));
+                  const content = json.choices?.[0]?.delta?.content;
+                  if (content) {
+                    controller.enqueue(new TextEncoder().encode(content));
+                  }
+                } catch (e) {
+                  // ignore JSON parse errors in SSE chunks
+                }
+              }
+            }
+          }
+        } catch (error) {
+          controller.enqueue(new TextEncoder().encode(`\n\n[API_ERROR] ${error.message || "Unknown Groq meta error"}`));
+        } finally {
+          controller.close();
+        }
+      }
+    });
+
+    return new Response(stream, {
+      headers: {
+        "Content-Type": "text/plain; charset=utf-8",
+        "Transfer-Encoding": "chunked",
+        "Cache-Control": "no-cache",
+      },
+    });
+  } else {
+    const genAI = new GoogleGenerativeAI(apiKey);
+    const stream = new ReadableStream({
+      async start(controller) {
+        try {
+          const model = genAI.getGenerativeModel({ model: "gemini-3.5-flash" });
+          const result = await generateWithRetry(model, prompt);
+
+          for await (const chunk of result.stream) {
+            const text = chunk.text();
+            if (text) {
+              controller.enqueue(new TextEncoder().encode(text));
+            }
+          }
+        } catch (error) {
+          controller.enqueue(new TextEncoder().encode(`\n\n[API_ERROR] ${error.message || "Unknown meta synthesis error"}`));
+        } finally {
+          controller.close();
+        }
+      },
+    });
+
+    return new Response(stream, {
+      headers: {
+        "Content-Type": "text/plain; charset=utf-8",
+        "Transfer-Encoding": "chunked",
+        "Cache-Control": "no-cache",
+      },
+    });
+  }
 }
