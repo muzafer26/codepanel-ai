@@ -263,131 +263,256 @@ function parsePrivacyFlow(code, reportText) {
   const links = [];
   if (!code) return { nodes, links, isLeak: false };
 
-  const sourceKeywords = ['card', 'cvv', 'email', 'phone', 'ssn', 'password', 'secret', 'token', 'userid', 'user', 'health', 'patient', 'billing'];
-  const sinkKeywords = ['console.log', 'console.error', 'console.warn', 'print', 'logger', 'fetch', 'axios', 'request', 'xhr', 'send', 'execute', 'query', 'db.'];
+  const sourceKeywords = ['card', 'cvv', 'email', 'phone', 'ssn', 'password', 'secret', 'token', 'key', 'auth', 'cred', 'user', 'health', 'patient', 'billing', 'pan', 'account', 'pin', 'address', 'dob', 'ip'];
+  const sinkKeywords = [
+    'console.log', 'console.error', 'console.warn', 'print', 'logger', 
+    'fetch', 'axios', 'xhr', 'db.execute', 'db.query', 'execute', 'query',
+    'res.send', 'res.json', 'res.write', 'fs.write', 'fs.writeFileSync', 'fs.writeFile',
+    'http.request', 'https.request', 'request.post', 'request.get'
+  ];
+
+  const cleanCodeString = (str) => {
+    if (!str) return '';
+    return str
+      .replace(/'[^']*'/g, '')
+      .replace(/"[^"]*"/g, '')
+      .replace(/\`[^\`]*\`/g, '');
+  };
+
+  const stripObjectKeys = (str) => {
+    if (!str) return '';
+    return str.replace(/[a-zA-Z0-9_$]+\s*:/g, '');
+  };
 
   const lines = code.split('\n');
-  const detectedSources = new Set();
-  const detectedSinks = new Set();
-  const detectedVariables = new Set();
+  const tainted = new Set();
+  const sinksFound = new Set();
+  const variablesFound = new Set();
+  const sourcesFound = new Set();
+  const assignments = [];
 
+  const isSensitive = (name) => {
+    if (typeof name !== 'string') return false;
+    const lower = name.toLowerCase();
+    return sourceKeywords.some(kw => lower.includes(kw));
+  };
+
+  const getIdentifiers = (str) => {
+    if (!str) return [];
+    const cleaned = stripObjectKeys(cleanCodeString(str));
+    return (cleaned.match(/[a-zA-Z0-9_$]+/g) || []).filter(tok => {
+      return !/^[0-9]+$/.test(tok) && !['const', 'let', 'var', 'function', 'def', 'return', 'import', 'from', 'require', 'class', 'if', 'else', 'for', 'while', 'async', 'await', 'true', 'false', 'null', 'undefined', 'new'].includes(tok);
+    });
+  };
+
+  // Step 1: Parse function parameters
   lines.forEach(line => {
-    const words = line.match(/[a-zA-Z0-9_$]+/g) || [];
-    words.forEach(word => {
-      if (word.length <= 2) return;
-      const lower = word.toLowerCase();
-      
-      const isSource = sourceKeywords.some(kw => lower.includes(kw));
-      const isSink = sinkKeywords.some(kw => lower.includes(kw));
-      
-      if (isSource) {
-        detectedSources.add(word);
-      } else if (isSink) {
-        detectedSinks.add(word);
-      } else if (word !== 'function' && word !== 'const' && word !== 'let' && word !== 'var' && word !== 'return') {
-        detectedVariables.add(word);
-      }
-    });
-
-    sinkKeywords.forEach(sinkKw => {
-      if (line.includes(sinkKw)) {
-        detectedSinks.add(sinkKw);
-      }
-    });
-  });
-
-  if (detectedSources.size === 0) {
-    detectedSources.add('email');
-    detectedSources.add('cardNumber');
-  }
-  if (detectedSinks.size === 0) {
-    detectedSinks.add('console.log');
-    detectedSinks.add('fetch');
-  }
-
-  const sourceList = Array.from(detectedSources);
-  const varList = Array.from(detectedVariables).filter(v => !detectedSources.has(v) && !detectedSinks.has(v)).slice(0, 5);
-  const sinkList = Array.from(detectedSinks);
-
-  sourceList.forEach(name => {
-    nodes.push({ id: name, type: 'source', color: '#ffd900', size: 10 });
-  });
-  varList.forEach(name => {
-    nodes.push({ id: name, type: 'variable', color: '#06d6a0', size: 7 });
-  });
-  sinkList.forEach(name => {
-    nodes.push({ id: name, type: 'sink', color: '#58a6ff', size: 11 });
-  });
-
-  const isLeak = /leak|pii|gdpr|violation|logging|unencrypted|expose/i.test(reportText || "");
-
-  sourceList.forEach(src => {
-    let linked = false;
-    lines.forEach(line => {
-      varList.forEach(v => {
-        if (line.includes(src) && line.includes(v)) {
-          links.push({ source: src, target: v, isUnsafe: false });
-          linked = true;
-        }
-      });
-    });
-
-    if (!linked) {
-      lines.forEach(line => {
-        sinkList.forEach(sink => {
-          if (line.includes(src) && line.includes(sink)) {
-            const isUnsafe = isLeak && (sink.includes('log') || sink.includes('fetch') || sink.includes('print'));
-            links.push({ source: src, target: sink, isUnsafe });
-            linked = true;
+    const trimmed = line.trim();
+    const cleanedLine = cleanCodeString(trimmed);
+    const funcMatch = cleanedLine.match(/(?:function|def)\s+[a-zA-Z0-9_$]*\s*\(([^)]*)\)/) || 
+                      cleanedLine.match(/(?:const|let|var)\s+[a-zA-Z0-9_$]+\s*=\s*(?:async\s*)?\(([^)]*)\)\s*=>/) ||
+                      cleanedLine.match(/\(([^)]*)\)\s*=>/);
+    if (funcMatch) {
+      const paramsStr = funcMatch[1];
+      const params = paramsStr.split(',').map(p => p.trim()).filter(Boolean);
+      params.forEach(param => {
+        const cleanParam = param.split(':')[0].split('=')[0].trim();
+        if (cleanParam) {
+          if (isSensitive(cleanParam)) {
+            sourcesFound.add(cleanParam);
+            tainted.add(cleanParam);
+          } else {
+            variablesFound.add(cleanParam);
           }
-        });
+        }
       });
     }
   });
 
-  varList.forEach(v => {
-    lines.forEach(line => {
-      sinkList.forEach(sink => {
-        if (line.includes(v) && line.includes(sink)) {
-          const isUnsafe = isLeak && (sink.includes('log') || sink.includes('fetch') || sink.includes('print'));
-          links.push({ source: v, target: sink, isUnsafe });
-        }
-      });
-    });
+  // Step 2: Parse assignments line-by-line
+  lines.forEach((line, idx) => {
+    const trimmed = line.trim();
+    const assignMatch = trimmed.match(/^(?:const|let|var)?\s*([a-zA-Z0-9_$,\s{}|[\]\.]+)\s*=\s*([^=].*)$/);
+    if (assignMatch) {
+      const lhsRaw = assignMatch[1].trim();
+      const rhsRaw = assignMatch[2].trim();
+      const lhsVars = getIdentifiers(lhsRaw);
+      if (lhsVars.length > 0) {
+        assignments.push({
+          lhs: lhsVars,
+          rhs: rhsRaw,
+          lineIndex: idx
+        });
+      }
+    }
   });
 
-  if (links.length === 0) {
-    sourceList.forEach((src, idx) => {
-      if (varList.length > 0) {
-        const v = varList[idx % varList.length];
-        links.push({ source: src, target: v, isUnsafe: false });
-        if (sinkList.length > 0) {
-          const sink = sinkList[idx % sinkList.length];
-          const isUnsafe = isLeak && (sink.includes('log') || sink.includes('fetch'));
-          links.push({ source: v, target: sink, isUnsafe });
+  // Step 3: Propagated taint mappings
+  for (let pass = 0; pass < 3; pass++) {
+    assignments.forEach(assign => {
+      const rhsVars = getIdentifiers(assign.rhs);
+      let isRhsTainted = false;
+      let taintSourceVar = null;
+
+      const cleanedRhs = cleanCodeString(assign.rhs);
+      const hasDirectSourceInRhs = rhsVars.some(v => isSensitive(v)) || 
+                                   /req\.(body|query|params|headers)|request\.(POST|GET|headers|args)|input\s*\(/.test(cleanedRhs);
+      
+      if (hasDirectSourceInRhs) {
+        isRhsTainted = true;
+        taintSourceVar = rhsVars.find(v => isSensitive(v)) || rhsVars[0] || 'input';
+        if (!tainted.has(taintSourceVar)) {
+          tainted.add(taintSourceVar);
+          sourcesFound.add(taintSourceVar);
         }
-      } else if (sinkList.length > 0) {
-        const sink = sinkList[idx % sinkList.length];
-        links.push({ source: src, target: sink, isUnsafe: isLeak });
+      }
+
+      rhsVars.forEach(v => {
+        if (tainted.has(v)) {
+          isRhsTainted = true;
+          taintSourceVar = v;
+        }
+      });
+
+      if (isRhsTainted && taintSourceVar) {
+        assign.lhs.forEach(lVar => {
+          if (!sourcesFound.has(lVar)) {
+            if (isSensitive(lVar)) {
+              sourcesFound.add(lVar);
+            } else {
+              variablesFound.add(lVar);
+            }
+          }
+          if (!tainted.has(lVar)) {
+            tainted.add(lVar);
+            const alreadyLinked = links.some(lk => lk.source === taintSourceVar && lk.target === lVar);
+            if (!alreadyLinked && taintSourceVar !== lVar) {
+              links.push({ source: taintSourceVar, target: lVar, isUnsafe: false });
+            }
+          }
+        });
       }
     });
   }
 
-  const sources = nodes.filter(n => n.type === 'source');
-  const variables = nodes.filter(n => n.type === 'variable');
-  const sinks = nodes.filter(n => n.type === 'sink');
+  // Step 4: Link tainted variables to sinks
+  lines.forEach(line => {
+    sinkKeywords.forEach(sink => {
+      const sinkPattern = new RegExp(`\\b${sink.replace('.', '\\.')}\\b`);
+      if (sinkPattern.test(line)) {
+        sinksFound.add(sink);
+        const lineIdentifiers = getIdentifiers(line);
+        lineIdentifiers.forEach(lVar => {
+          if (tainted.has(lVar)) {
+            const alreadyLinked = links.some(lk => lk.source === lVar && lk.target === sink);
+            if (!alreadyLinked) {
+              links.push({ source: lVar, target: sink, isUnsafe: false });
+            }
+          }
+        });
+      }
+    });
+  });
 
-  sources.forEach((n, i) => {
+  // Step 5: Fallback behavior for completely empty or generic files
+  if (sourcesFound.size === 0 && variablesFound.size === 0 && sinksFound.size === 0) {
+    sourcesFound.add('email');
+    sourcesFound.add('cardNumber');
+    tainted.add('email');
+    tainted.add('cardNumber');
+    sinksFound.add('console.log');
+    sinksFound.add('fetch');
+    links.push({ source: 'email', target: 'console.log', isUnsafe: true });
+    links.push({ source: 'cardNumber', target: 'fetch', isUnsafe: true });
+  } else {
+    if (sinksFound.size === 0) {
+      sinksFound.add('console.log');
+    }
+    if (sourcesFound.size === 0 && variablesFound.size > 0) {
+      const firstVar = Array.from(variablesFound)[0];
+      variablesFound.delete(firstVar);
+      sourcesFound.add(firstVar);
+      tainted.add(firstVar);
+    }
+  }
+
+  // Step 6: Create nodes
+  sourcesFound.forEach(name => {
+    nodes.push({ id: name, type: 'source', color: '#ffd900', size: 10 });
+  });
+  variablesFound.forEach(name => {
+    if (!sourcesFound.has(name)) {
+      nodes.push({ id: name, type: 'variable', color: '#06d6a0', size: 7 });
+    }
+  });
+  sinksFound.forEach(name => {
+    nodes.push({ id: name, type: 'sink', color: '#58a6ff', size: 11 });
+  });
+
+  // Step 7: Reachability check for isLeak
+  const hasPathToSink = (startNodeId, targetSinkId, visited = new Set()) => {
+    if (startNodeId === targetSinkId) return true;
+    visited.add(startNodeId);
+    const outgoing = links.filter(lk => lk.source === startNodeId);
+    for (const lk of outgoing) {
+      if (!visited.has(lk.target)) {
+        if (hasPathToSink(lk.target, targetSinkId, visited)) {
+          return true;
+        }
+      }
+    }
+    return false;
+  };
+
+  let codeLeakDetected = false;
+  const sourceNodeIds = Array.from(sourcesFound);
+  const sinkNodeIds = Array.from(sinksFound);
+  
+  for (const src of sourceNodeIds) {
+    for (const sink of sinkNodeIds) {
+      if (hasPathToSink(src, sink)) {
+        codeLeakDetected = true;
+        break;
+      }
+    }
+    if (codeLeakDetected) break;
+  }
+
+  const isLeak = codeLeakDetected || /leak|pii|gdpr|violation|logging|unencrypted|expose/i.test(reportText || "");
+
+  // Step 8: Mark unsafe links
+  links.forEach(link => {
+    const reachesSink = sinkNodeIds.some(sinkId => hasPathToSink(link.target, sinkId));
+    if (isLeak && (reachesSink || link.target.includes('log') || link.target.includes('fetch') || link.target.includes('print'))) {
+      link.isUnsafe = true;
+    }
+  });
+
+  if (links.length === 0 && nodes.length > 0) {
+    const srcArr = Array.from(sourcesFound);
+    const sinkArr = Array.from(sinksFound);
+    srcArr.forEach((src, idx) => {
+      const sink = sinkArr[idx % sinkArr.length];
+      links.push({ source: src, target: sink, isUnsafe: isLeak });
+    });
+  }
+
+  // Step 9: Position nodes on the 2D layout canvas
+  const finalSources = nodes.filter(n => n.type === 'source');
+  const finalVariables = nodes.filter(n => n.type === 'variable');
+  const finalSinks = nodes.filter(n => n.type === 'sink');
+
+  finalSources.forEach((n, i) => {
     n.xPercent = 0.18;
-    n.yPercent = sources.length <= 1 ? 0.5 : 0.22 + (i * 0.56) / (sources.length - 1);
+    n.yPercent = finalSources.length <= 1 ? 0.5 : 0.22 + (i * 0.56) / (finalSources.length - 1);
   });
-  variables.forEach((n, i) => {
+  finalVariables.forEach((n, i) => {
     n.xPercent = 0.5;
-    n.yPercent = variables.length <= 1 ? 0.5 : 0.18 + (i * 0.64) / (variables.length - 1);
+    n.yPercent = finalVariables.length <= 1 ? 0.5 : 0.18 + (i * 0.64) / (finalVariables.length - 1);
   });
-  sinks.forEach((n, i) => {
+  finalSinks.forEach((n, i) => {
     n.xPercent = 0.82;
-    n.yPercent = sinks.length <= 1 ? 0.5 : 0.32 + (i * 0.36) / (sinks.length - 1);
+    n.yPercent = finalSinks.length <= 1 ? 0.5 : 0.32 + (i * 0.36) / (finalSinks.length - 1);
   });
 
   links.forEach(link => {
