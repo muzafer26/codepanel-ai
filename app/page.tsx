@@ -1,6 +1,7 @@
 "use client";
 import { useState, useRef, useCallback, useEffect } from "react";
 import * as acorn from "acorn";
+import { runStaticScanner, calculateMultiScoring } from "./utils/scanner";
 
 const EXAMPLES = [
   {
@@ -103,7 +104,7 @@ function generateASTTree(code, language = "javascript") {
       const parsed = acorn.parse(code, { ecmaVersion: 2022, sourceType: "module", locations: true });
       const body = [];
 
-      parsed.body.forEach(node => {
+      parsed.body.forEach((node: any) => {
         const line = node.loc ? node.loc.start.line : 1;
         
         if (node.type === "ImportDeclaration") {
@@ -111,29 +112,29 @@ function generateASTTree(code, language = "javascript") {
             type: "ImportDeclaration",
             line,
             source: node.source.value,
-            specifiers: node.specifiers.map(s => s.local?.name || "import")
+            specifiers: node.specifiers.map((s: any) => s.local?.name || "import")
           });
         } else if (node.type === "FunctionDeclaration") {
           body.push({
             type: "FunctionDeclaration",
             line,
             id: node.id ? node.id.name : "anonymous",
-            params: node.params.map(p => p.name || p.left?.name || "param")
+            params: node.params.map((p: any) => p.name || p.left?.name || "param")
           });
         } else if (node.type === "VariableDeclaration") {
-          node.declarations.forEach(decl => {
+          node.declarations.forEach((decl: any) => {
             const declLine = decl.loc ? decl.loc.start.line : line;
             let initSnippet = "assign";
             if (decl.init) {
               initSnippet = code.substring(decl.init.start, decl.init.end);
             }
-            const getLhsNames = (idNode) => {
+            const getLhsNames = (idNode: any) => {
               if (idNode.type === "Identifier") return [idNode.name];
               if (idNode.type === "ObjectPattern") {
-                return idNode.properties.map(p => p.value?.name || p.key?.name).filter(Boolean);
+                return idNode.properties.map((p: any) => p.value?.name || p.key?.name).filter(Boolean);
               }
               if (idNode.type === "ArrayPattern") {
-                return idNode.elements.map(el => el?.name).filter(Boolean);
+                return idNode.elements.map((el: any) => el?.name).filter(Boolean);
               }
               return ["var"];
             };
@@ -153,7 +154,7 @@ function generateASTTree(code, language = "javascript") {
             type: "CallExpression",
             line,
             callee,
-            arguments: node.expression.arguments.map(arg => code.substring(arg.start, arg.end)).slice(0, 3)
+            arguments: node.expression.arguments.map((arg: any) => code.substring(arg.start, arg.end)).slice(0, 3)
           });
         } else {
           body.push({
@@ -239,106 +240,7 @@ function generateASTTree(code, language = "javascript") {
   };
 }
 
-// Client-side Rule-based Static Heuristics Scanner
-function runStaticScanner(code) {
-  const findings = [];
-  if (!code) return findings;
-  const lines = code.split('\n');
-
-  const rules = [
-    {
-      id: 'static-sqli',
-      severity: 'CRITICAL',
-      title: 'SQL Injection Vulnerability',
-      regex: /(select\s+.*\s+from|insert\s+into|update\s+.*set)\s+.*\s*\+\s*[a-zA-Z0-9_$]+/i,
-      desc: 'Direct string concatenation detected in a query. Exposed to parameter spoofing. Parameters should be parameterized.'
-    },
-    {
-      id: 'static-eval',
-      severity: 'CRITICAL',
-      title: 'Dangerous eval() Execution',
-      regex: /\beval\s*\(/i,
-      desc: 'The eval() call executes string parameters as code, introducing severe Remote Code Execution (RCE) exposure.'
-    },
-    {
-      id: 'static-secret',
-      severity: 'HIGH',
-      title: 'Hardcoded Cryptographic Secret',
-      regex: /(password|api_key|apikey|secret|token|client_secret|private_key)\s*=\s*['"][a-zA-Z0-9_\-]{6,}['"]/i,
-      desc: 'Plain text keys inside files are vulnerable to leaks. Transition secrets to server variables.'
-    },
-    {
-      id: 'static-log-pii',
-      severity: 'HIGH',
-      title: 'PII Log Exposure',
-      regex: /console\.(log|warn|error)\(.*\+.*\b(email|card|cvv|ssn|phone|password|secret|token)\b/i,
-      desc: 'Raw personal parameters exported to terminal logs. Encrypt or mask credentials before logging.'
-    },
-    {
-      id: 'static-unsecure-http',
-      severity: 'MEDIUM',
-      title: 'Unencrypted Transmission',
-      regex: /fetch\(\s*['"]http:\/\/[a-zA-Z0-9_\-\.]+/i,
-      desc: 'Transmitting sensitive variables via unencrypted HTTP protocols. Enforce HTTPS.'
-    },
-    {
-      id: 'static-redos',
-      severity: 'MEDIUM',
-      title: 'ReDoS Vulnerability (Dangerous RegExp)',
-      regex: /([a-zA-Z0-9_\-|]+[\*+])+[\*+]/i,
-      desc: 'Detected potential nested repeating groups in regex. Vulnerable to Regular Expression Denial of Service (ReDoS) from backtracking.'
-    },
-    {
-      id: 'static-sync-block',
-      severity: 'HIGH',
-      title: 'Blocking Sync Operation',
-      regex: /\b(readFileSync|writeFileSync|execSync|spawnSync)\b/i,
-      desc: 'Blocking synchronous call halts thread execution in Node.js event loops. Transition to non-blocking async functions.'
-    }
-  ];
-
-  lines.forEach((lineText, idx) => {
-    rules.forEach(rule => {
-      if (rule.regex.test(lineText)) {
-        findings.push({
-          id: `${rule.id}-${idx}`,
-          severity: rule.severity,
-          title: rule.title,
-          line: idx + 1,
-          desc: rule.desc,
-          snippet: lineText.trim()
-        });
-      }
-    });
-  });
-
-  // Dynamic Dependency Scan
-  const importRegex = /(?:import\s+.*\s+from\s+['"]|require\(\s*['"])([@a-zA-Z0-9_\-\/]+)/g;
-  let match;
-  const vulnPacks = {
-    'lodash': { msg: 'Prototype Pollution (CVE-2020-8203) - upgrade to >= 4.17.21', severity: 'HIGH' },
-    'axios': { msg: 'Server-Side Request Forgery (SSRF) (CVE-2020-28168) - upgrade to >= 0.21.1', severity: 'HIGH' },
-    'express': { msg: 'Open Redirect & Parameter Pollution - upgrade to >= 4.16.0', severity: 'MEDIUM' },
-    'moment': { msg: 'ReDoS Vulnerability (CVE-2022-31129) - upgrade to >= 2.29.4', severity: 'MEDIUM' },
-    'minimist': { msg: 'Prototype Pollution (CVE-2021-3545) - upgrade to >= 1.2.6', severity: 'HIGH' }
-  };
-
-  while ((match = importRegex.exec(code)) !== null) {
-    const packName = match[1];
-    if (vulnPacks[packName]) {
-      findings.push({
-        id: `static-dep-${packName}`,
-        severity: vulnPacks[packName].severity,
-        title: `Outdated Dependency: ${packName}`,
-        line: 'Manifest',
-        desc: vulnPacks[packName].msg,
-        snippet: `Imported library: ${packName}`
-      });
-    }
-  }
-
-  return findings;
-}
+// runStaticScanner is imported from ./utils/scanner
 
 function parsePrivacyFlow(code, reportText) {
   const nodes = [];
@@ -834,49 +736,7 @@ function ASTExplorer({ ast }) {
   );
 }
 
-function calculateMultiScoring(code, panels, staticFindings) {
-  let security = 100;
-  let privacy = 100;
-  let maintainability = 100;
-
-  staticFindings.forEach(f => {
-    if (f.severity === 'CRITICAL') {
-      security -= 22;
-      privacy -= 8;
-    } else if (f.severity === 'HIGH') {
-      security -= 14;
-      privacy -= 12;
-    } else if (f.severity === 'MEDIUM') {
-      security -= 6;
-      maintainability -= 10;
-    }
-  });
-
-  const secText = panels.security || "";
-  const perfText = panels.performance || "";
-  const styleText = panels.style || "";
-  const compText = panels.compliance || "";
-
-  const secVulnerabilities = (secText.match(/CRITICAL|\[VULN\]|🔴/g) || []).length;
-  const secWarnings = (secText.match(/HIGH|\[WARN\]|🟡/g) || []).length;
-  security -= (secVulnerabilities * 12 + secWarnings * 6);
-
-  const complianceLeaks = (compText.match(/CRITICAL|\[LEAK\]|\[GDPR\]|🔴/g) || []).length;
-  const complianceWarnings = (compText.match(/HIGH|\[PII\]|🟡/g) || []).length;
-  privacy -= (complianceLeaks * 14 + complianceWarnings * 7);
-
-  const styleSmells = (styleText.match(/HIGH|\[SMELL\]|\[DEBT\]|🔴/g) || []).length;
-  const latencyBottlenecks = (perfText.match(/SEVERE|\[SLOW\]|\[LEAK\]/g) || []).length;
-  maintainability -= (styleSmells * 8 + latencyBottlenecks * 6);
-
-  security = Math.max(10, Math.min(100, security));
-  privacy = Math.max(10, Math.min(100, privacy));
-  maintainability = Math.max(10, Math.min(100, maintainability));
-
-  const readiness = Math.round(security * 0.45 + privacy * 0.35 + maintainability * 0.20);
-
-  return { security, privacy, maintainability, readiness };
-}
+// calculateMultiScoring is imported from ./utils/scanner
 
 const extractFixedCode = (text) => {
   const match = text.match(/RECOMMENDED REFACTORED CODE:\s*```[a-zA-Z]*\n([\s\S]*?)```/i);
@@ -945,6 +805,15 @@ export default function Page() {
   const [simProgress, setSimProgress] = useState(0);
   const [simLogs, setSimLogs] = useState([]);
   const [simScore, setSimScore] = useState(100);
+  const [sandboxCode, setSandboxCode] = useState(`function processPayment(cardNumber, cvv) {
+  // Sensitive credentials logged unprotected
+  console.log("CVV: " + cvv + " card: " + cardNumber);
+
+  // Transmission via raw unencrypted HTTP fetch
+  fetch('http://api.payment.internal/pay', {
+    body: JSON.stringify({ cardNumber, cvv })
+  });
+}`);
 
   const panelRefs = {
     security: useRef(null),
@@ -1013,35 +882,111 @@ export default function Page() {
     setPipelinePhase("idle");
   }, []);
 
-  const runLandingSimulation = () => {
+  const runLandingSimulation = async () => {
     if (simRunning) return;
     setSimRunning(true);
-    setSimProgress(0);
-    setSimLogs([]);
+    setSimProgress(10);
+    setSimLogs(["> Initializing analysis pipeline..."]);
     setSimScore(100);
 
-    const steps = [
-      { prg: 15, score: 100, msg: "> Initializing Aperture compliance engines..." },
-      { prg: 35, score: 95, msg: "> Scanning SOURCE_INGESTION_BUFFER... Found: (4 parameters)" },
-      { prg: 50, score: 70, msg: "> [VULN] SECURITY WARNING: Card numbers exposure on line 5" },
-      { prg: 75, score: 45, msg: "> [LEAK] PRIVACY WARNING: Raw CVV logging inside console.log sink" },
-      { prg: 90, score: 40, msg: "> Tracing variable card -> internal endpoint (unencrypted fetch)" },
-      { prg: 100, score: 40, msg: "> Synthesis Matrix compile completed. Risk state: HIGH" }
-    ];
+    try {
+      // 1. Run local static scanner
+      await new Promise(r => setTimeout(r, 450));
+      const heuristics = runStaticScanner(sandboxCode);
+      setSimProgress(30);
 
-    let currentStep = 0;
-    const interval = setInterval(() => {
-      if (currentStep < steps.length) {
-        const nextData = steps[currentStep];
-        setSimProgress(nextData.prg);
-        setSimScore(nextData.score);
-        setSimLogs(prev => [...prev, nextData.msg]);
-        currentStep++;
-      } else {
-        clearInterval(interval);
-        setSimRunning(false);
+      let currentScore = 100;
+      const initialLogs = [
+        "> Initializing analysis pipeline...",
+        `> Static analysis complete. Found ${heuristics.length} potential issues.`
+      ];
+
+      heuristics.forEach(h => {
+        initialLogs.push(`[STATIC] [${h.severity}] ${h.title} (line ${h.line})`);
+        if (h.severity === 'CRITICAL') currentScore -= 20;
+        else if (h.severity === 'HIGH') currentScore -= 12;
+        else if (h.severity === 'MEDIUM') currentScore -= 6;
+      });
+      setSimLogs(initialLogs);
+      setSimScore(Math.max(10, currentScore));
+
+      await new Promise(r => setTimeout(r, 650));
+      setSimProgress(50);
+      setSimLogs(prev => [...prev, "> Contacting multi-agent consensus grid..."]);
+
+      // Run agents in parallel
+      const agentsToCall = ["security", "compliance", "performance", "style"];
+      const agentResults = { security: "", compliance: "", performance: "", style: "" };
+
+      setSimProgress(70);
+
+      await Promise.all(agentsToCall.map(async (agentId) => {
+        try {
+          const result = await streamFromAPI(
+            "/api/review",
+            { code: sandboxCode, language: "javascript", agentType: agentId },
+            (chunk) => {
+              // Parse warnings to display in simulator console
+              const lines = chunk.split("\n");
+              lines.forEach(line => {
+                const trimmed = line.trim();
+                if (trimmed.startsWith("[WARN]") || trimmed.startsWith("[VULN]") || trimmed.startsWith("[PII]") || trimmed.startsWith("[LEAK]") || trimmed.startsWith("[GDPR]") || trimmed.startsWith("[SLOW]") || trimmed.startsWith("[SMELL]") || trimmed.startsWith("[DEBT]")) {
+                  setSimLogs(prev => {
+                    const entry = `[${agentId.toUpperCase()}] ${trimmed}`;
+                    if (prev.includes(entry)) return prev;
+                    return [...prev, entry];
+                  });
+                }
+              });
+            }
+          );
+          agentResults[agentId] = result;
+        } catch (err) {
+          console.error(`Simulator agent ${agentId} failed:`, err);
+        }
+      }));
+
+      setSimProgress(90);
+      setSimLogs(prev => [...prev, "> Compiling Meta synthesis and resolving conflicts..."]);
+
+      // Call meta synthesis
+      let finalMeta = "";
+      try {
+        finalMeta = await streamFromAPI(
+          "/api/meta",
+          {
+            security: agentResults.security,
+            performance: agentResults.performance,
+            style: agentResults.style,
+            compliance: agentResults.compliance,
+            language: "javascript"
+          },
+          () => {}
+        );
+      } catch (err) {
+        console.error("Simulator meta failed:", err);
       }
-    }, 700);
+
+      // Calculate final score
+      const finalScores = calculateMultiScoring(sandboxCode, agentResults, heuristics);
+      setSimScore(finalScores.readiness);
+      setSimProgress(100);
+
+      // Parse executive summary
+      const execSummaryMatch = finalMeta.match(/EXECUTIVE SUMMARY:\s*([\s\S]*?)(?=\n\n|\n[A-Z0-9\s]+:|$)/i);
+      const execSummary = execSummaryMatch ? execSummaryMatch[1].trim() : "Analysis finished.";
+
+      setSimLogs(prev => [
+        ...prev,
+        `> Pipeline complete. Readiness Score: ${finalScores.readiness}%`,
+        `[SUMMARY] ${execSummary}`
+      ]);
+    } catch (err: any) {
+      console.error("Simulation failed:", err);
+      setSimLogs(prev => [...prev, `\n⚠️ Simulation failed: ${err.message}`]);
+    } finally {
+      setSimRunning(false);
+    }
   };
 
   const triggerExploitSimulation = (type) => {
@@ -1094,9 +1039,9 @@ export default function Page() {
     setPipelinePhase("agents");
     setStatus({ security: "scanning", performance: "scanning", style: "scanning", compliance: "scanning" });
 
-    const results = {};
+    const results: any = {};
 
-    const runAgent = async (agent, index) => {
+    const runAgent = async (agent: any, index: number) => {
       await new Promise((resolve) => setTimeout(resolve, index * 220));
       
       try {
@@ -1245,7 +1190,7 @@ export default function Page() {
     return diff;
   };
 
-  const styles = {
+  const styles: any = {
     landing: {
       minHeight: "100vh",
       background: "#000000",
@@ -1403,7 +1348,7 @@ export default function Page() {
         <div style={{ position: "absolute", bottom: "20%", right: "15%", width: 600, height: 600, background: "rgba(255, 217, 0, 0.03)", filter: "blur(140px)", borderRadius: "50%", pointerEvents: "none" }} />
 
         {/* Top Header */}
-        <div style={{ width: "100%", height: 64, borderBottom: "1px solid rgba(255, 217, 0, 0.12)", display: "flex", alignItems: "center", justifySpace: "space-between", justifyContent: "space-between", padding: "0 40px", zIndex: 5, background: "rgba(0,0,0,0.8)", backdropFilter: "blur(4px)" }}>
+        <div style={{ width: "100%", height: 64, borderBottom: "1px solid rgba(255, 217, 0, 0.12)", display: "flex", alignItems: "center",  justifyContent: "space-between", padding: "0 40px", zIndex: 5, background: "rgba(0,0,0,0.8)", backdropFilter: "blur(4px)" }}>
           <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
             <span style={{ fontSize: 20, color: "#ffd900" }}>⌬</span>
             <span style={{ fontSize: 13, fontWeight: 900, fontFamily: "'Cousine', monospace", letterSpacing: "1.5px" }}>CODEPANEL // AI</span>
@@ -1415,7 +1360,7 @@ export default function Page() {
           </div>
           <div style={{ display: "flex", gap: 10 }}>
             <button onClick={() => setShowArchModal(true)} className="btn-block-outline" style={{ ...styles.btn(false), padding: "8px 18px", fontSize: 9 }}>
-              [ SYSTEM ARCHITECTURE ]
+              [ RECRUITER SYSTEM GUIDE ]
             </button>
             <button onClick={() => setViewMode("console")} className="btn-block-yellow" style={{ ...styles.btn(true), padding: "8px 18px", fontSize: 9 }}>
               [ INITIALIZE_CONSOLE ]
@@ -1441,12 +1386,8 @@ export default function Page() {
 
           <div style={{ display: "flex", gap: 12, justifyContent: "center", marginBottom: 64 }}>
             <button onClick={() => setViewMode("console")} className="btn-block-yellow"
-              style={{ ...styles.btn(true), padding: "16px 36px", fontSize: 11 }}>
-              [ Ingest Source Code ]
-            </button>
-            <button onClick={() => setShowArchModal(true)} className="btn-block-outline"
-              style={{ ...styles.btn(false), padding: "16px 36px", fontSize: 11 }}>
-              [ Recruiter Guide ]
+              style={{ ...styles.btn(true), padding: "16px 48px", fontSize: 11 }}>
+              [ INGEST SOURCE CODE & EXECUTE AUDIT ]
             </button>
           </div>
         </div>
@@ -1467,18 +1408,29 @@ export default function Page() {
             </div>
             
             <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", minHeight: 300, background: "#000000" }} className="hidden-y5lvp6">
-              <div style={{ borderRight: "1px solid rgba(255, 217, 0, 0.15)", padding: 16, fontFamily: "'JetBrains Mono', monospace", fontSize: 10.5, color: "#8b949e", position: "relative" }}>
-                <div style={{ color: "#ffd900", marginBottom: 12, fontFamily: "'Cousine', monospace", fontSize: 9 }}>// SIMULATED SOURCE BUFFER:</div>
-                <div style={{ lineHeight: 1.6 }}>
-                  <span style={{ color: "#f97583" }}>function</span> <span style={{ color: "#b392f0" }}>processPayment</span>(cardNumber, cvv) &#123; <br />
-                  &nbsp;&nbsp;<span style={{ color: "#8b949e" }}>// Sensitive credentials logged unprotected</span> <br />
-                  &nbsp;&nbsp;<span style={{ color: "#e1e4e8" }}>console</span>.<span style={{ color: "#b392f0" }}>log</span>(<span style={{ color: "#9ecbff" }}>"CVV: "</span> + cvv + <span style={{ color: "#9ecbff" }}>" card: "</span> + cardNumber); <br /><br />
-                  &nbsp;&nbsp;<span style={{ color: "#8b949e" }}>// Transmission via raw unencrypted HTTP fetch</span> <br />
-                  &nbsp;&nbsp;<span style={{ color: "#b392f0" }}>fetch</span>(<span style={{ color: "#9ecbff" }}>'http://api.payment.internal/pay'</span>, &#123; <br />
-                  &nbsp;&nbsp;&nbsp;&nbsp;body: JSON.stringify(&#123; cardNumber, cvv &#125;) <br />
-                  &nbsp;&nbsp;&#125;); <br />
-                  &#125;
-                </div>
+              <div style={{ borderRight: "1px solid rgba(255, 217, 0, 0.15)", padding: 16, fontFamily: "'JetBrains Mono', monospace", fontSize: 10.5, color: "#8b949e", position: "relative", display: "flex", flexDirection: "column" }}>
+                <div style={{ color: "#ffd900", marginBottom: 12, fontFamily: "'Cousine', monospace", fontSize: 9 }}>// SIMULATED SOURCE BUFFER (EDITABLE):</div>
+                <textarea
+                  value={sandboxCode}
+                  onChange={(e) => setSandboxCode(e.target.value)}
+                  disabled={simRunning}
+                  spellCheck={false}
+                  style={{
+                    flex: 1,
+                    width: "100%",
+                    minHeight: "180px",
+                    background: "transparent",
+                    border: "none",
+                    color: "#a6acb9",
+                    fontFamily: "'JetBrains Mono', monospace",
+                    fontSize: "10.5px",
+                    lineHeight: "1.6",
+                    resize: "none",
+                    outline: "none",
+                    padding: 0,
+                    margin: 0
+                  }}
+                />
                 
                 {simRunning && (
                   <div style={{ position: "absolute", bottom: 12, left: 12, right: 12, background: "rgba(255, 217, 0, 0.05)", border: "1px solid #ffd900", padding: "8px 12px", display: "flex", alignItems: "center", gap: 12 }}>
@@ -1491,7 +1443,7 @@ export default function Page() {
                 )}
               </div>
               
-              <div style={{ padding: 16, background: "#030303", display: "flex", flexDirection: "column", justifySpace: "space-between", justifyContent: "space-between" }}>
+              <div style={{ padding: 16, background: "#030303", display: "flex", flexDirection: "column",  justifyContent: "space-between" }}>
                 <div style={{ fontFamily: "'Cousine', monospace", fontSize: 10, lineHeight: 1.8, color: "#ffffff" }}>
                   <div style={{ color: "rgba(255,255,255,0.3)", marginBottom: 8 }}>// MOCK VERDICT OUTPUT:</div>
                   {simLogs.length === 0 && (
@@ -1510,7 +1462,7 @@ export default function Page() {
                   {simRunning && <span style={{ display: "inline-block", width: 6, height: 11, background: "#ffd900", marginLeft: 2, animation: "blink 1s step-end infinite" }} />}
                 </div>
 
-                <div style={{ display: "flex", alignItems: "center", justifySpace: "space-between", justifyContent: "space-between", borderTop: "1px solid rgba(255, 217, 0, 0.12)", paddingTop: 12, marginTop: 12 }}>
+                <div style={{ display: "flex", alignItems: "center",  justifyContent: "space-between", borderTop: "1px solid rgba(255, 217, 0, 0.12)", paddingTop: 12, marginTop: 12 }}>
                   <button onClick={runLandingSimulation} disabled={simRunning} className="btn-block-yellow" style={{ ...styles.btn(true), padding: "8px 20px", fontSize: 9, opacity: simRunning ? 0.6 : 1 }}>
                     {simRunning ? "[ RUNNING SIMULATION... ]" : "[ SIMULATE LIVE AUDIT ]"}
                   </button>
@@ -1535,7 +1487,7 @@ export default function Page() {
 
         {/* Feature Bento Matrix */}
         <div id="feature-anchor" style={{ width: "100%", maxWidth: 1040, padding: "0 24px", boxSizing: "border-box", zIndex: 2 }}>
-          <div style={{ display: "flex", justifySpace: "space-between", justifyContent: "space-between", borderBottom: "1px solid rgba(255, 217, 0, 0.15)", paddingBottom: 16, marginBottom: 28 }}>
+          <div style={{ display: "flex",  justifyContent: "space-between", borderBottom: "1px solid rgba(255, 217, 0, 0.15)", paddingBottom: 16, marginBottom: 28 }}>
             <span style={{ fontSize: 11, fontFamily: "'Cousine', monospace", color: "#ffd900", letterSpacing: "2.5px" }}>[ SYSTEM SECURITY SPECIFICATIONS ]</span>
             <span style={{ fontSize: 9, fontFamily: "'Cousine', monospace", color: "rgba(255,255,255,0.3)" }}>// ENTERPRISE PIPELINE // ACTIVE</span>
           </div>
@@ -1601,7 +1553,7 @@ export default function Page() {
           <div style={{ position: "fixed", top: 0, left: 0, right: 0, bottom: 0, background: "rgba(0,0,0,0.85)", zIndex: 1000, display: "flex", alignItems: "center", justifyContent: "center", padding: 20 }}>
             <div style={{ background: "#000000", border: "1px solid #ffd900", padding: 32, maxWidth: 840, width: "100%", position: "relative", fontFamily: "'Inter', sans-serif" }}>
               <CornerCrosses />
-              <div style={{ display: "flex", justifySpace: "space-between", justifyContent: "space-between", alignItems: "center", borderBottom: "1px solid rgba(255, 217, 0, 0.2)", paddingBottom: 16, marginBottom: 24 }}>
+              <div style={{ display: "flex",  justifyContent: "space-between", alignItems: "center", borderBottom: "1px solid rgba(255, 217, 0, 0.2)", paddingBottom: 16, marginBottom: 24 }}>
                 <span style={{ fontSize: 11, color: "#ffd900", fontFamily: "'Cousine', monospace", letterSpacing: "2.5px" }}>[ HYBRID SYSTEM ARCHITECTURE EXPLORER ]</span>
                 <button onClick={() => setShowArchModal(false)} style={{ background: "none", border: "none", color: "#ffd900", cursor: "pointer", fontSize: 10, fontFamily: "'Cousine', monospace" }}>✕ CLOSE</button>
               </div>
@@ -1696,7 +1648,7 @@ export default function Page() {
       <div style={{ flex: 1, padding: "20px 40px", display: "flex", flexDirection: "column", gap: 16, width: "100%", boxSizing: "border-box" }}>
 
         {/* Dynamic Scan Execution Pipeline Stepper */}
-        <div style={{ ...styles.card, padding: "10px 16px", background: "#050505", display: "flex", justifySpace: "space-between", justifyContent: "space-between", alignItems: "center" }}>
+        <div style={{ ...styles.card, padding: "10px 16px", background: "#050505", display: "flex",  justifyContent: "space-between", alignItems: "center" }}>
           <span style={{ fontSize: 8.5, fontFamily: "'Cousine', monospace", color: "#ffd900", letterSpacing: "2px" }}>
             [ ANALYSIS_PIPELINE_STATUS ]
           </span>
@@ -1817,7 +1769,7 @@ export default function Page() {
             {staticFindings.length > 0 && (
               <div style={{ ...styles.card, padding: 16, background: "#050000", border: "1px solid rgba(255, 77, 109, 0.4)" }}>
                 <CornerCrosses />
-                <div style={{ display: "flex", alignItems: "center", justifySpace: "space-between", justifyContent: "space-between", marginBottom: 10 }}>
+                <div style={{ display: "flex", alignItems: "center",  justifyContent: "space-between", marginBottom: 10 }}>
                   <span style={{ fontSize: 9, color: "#ff4d6d", letterSpacing: "2.5px", fontWeight: 700, fontFamily: "'Cousine', monospace" }}>
                     [ HEURISTICS PRE-SCAN EXPOSURE DETECTED (0ms) ]
                   </span>
@@ -1834,9 +1786,9 @@ export default function Page() {
                 <div style={{ display: "flex", flexDirection: "column", gap: 10, fontFamily: "'Cousine', monospace", fontSize: 10.5 }}>
                   {staticFindings.map((f, i) => (
                     <div key={i} style={{ borderBottom: i < staticFindings.length - 1 ? "1px dashed rgba(255, 77, 109, 0.15)" : "none", paddingBottom: 8 }}>
-                      <div style={{ display: "flex", alignItems: "center", justifySpace: "space-between", justifyContent: "space-between", color: f.severity === 'CRITICAL' ? '#ff4d6d' : '#ffd166', fontWeight: 700 }}>
+                      <div style={{ display: "flex", alignItems: "center",  justifyContent: "space-between", color: f.severity === 'CRITICAL' ? '#ff4d6d' : '#ffd166', fontWeight: 700 }}>
                         <span>● {f.title} (Line {f.line})</span>
-                        <span>{f.severity} // 92% CONFIDENCE</span>
+                        <span>{f.severity} // {f.confidence || 75}% CONFIDENCE</span>
                       </div>
                       <div style={{ color: "#8b949e", margin: "4px 0" }}>{f.desc}</div>
                       <div style={{ background: "#0c0204", padding: "4px 8px", color: "#ff4d6d", fontSize: 9.5, borderLeft: "2px solid #ff4d6d" }}>
@@ -1912,7 +1864,7 @@ export default function Page() {
               <div style={{ ...styles.card, border: "1px solid #ffd900", marginTop: 16 }}>
                 <CornerCrosses />
                 
-                <div style={{ padding: "10px 16px", borderBottom: "1px solid rgba(255, 217, 0, 0.15)", display: "flex", justifySpace: "space-between", justifyContent: "space-between", alignItems: "center", background: "#050505" }}>
+                <div style={{ padding: "10px 16px", borderBottom: "1px solid rgba(255, 217, 0, 0.15)", display: "flex",  justifyContent: "space-between", alignItems: "center", background: "#050505" }}>
                   <span style={{ fontSize: 9, color: "#ffd900", fontWeight: 800, letterSpacing: "2.5px", fontFamily: "'Cousine', monospace" }}>[ CELL_DIFF_COMPILER / REFACTORING_COMPARISON ]</span>
                   <button onClick={() => setShowDiff(false)} style={{ background: "none", border: "none", color: "#ffd900", cursor: "pointer", fontSize: 9, fontWeight: 700, fontFamily: "'Cousine', monospace" }}>✕ CLOSE</button>
                 </div>
@@ -1925,7 +1877,7 @@ export default function Page() {
                     </pre>
                   </div>
                   <div style={{ background: "#000000", padding: 14 }}>
-                    <div style={{ fontSize: 9, color: "#ffd900", fontWeight: 700, marginBottom: 8, display: "flex", justifySpace: "space-between", justifyContent: "space-between", alignItems: "center", letterSpacing: "1.5px", fontFamily: "'Cousine', monospace" }}>
+                    <div style={{ fontSize: 9, color: "#ffd900", fontWeight: 700, marginBottom: 8, display: "flex",  justifyContent: "space-between", alignItems: "center", letterSpacing: "1.5px", fontFamily: "'Cousine', monospace" }}>
                       <span>[ REFACTORED OUTPUT ]</span>
                       <button onClick={() => { navigator.clipboard.writeText(fixedCode); }} style={{ background: "none", border: "none", color: "#ffd900", cursor: "pointer", fontSize: 8, textDecoration: "underline", fontWeight: 700 }}>COPY CODE</button>
                     </div>
@@ -1946,7 +1898,7 @@ export default function Page() {
             {(Object.values(status).some(s => s !== "idle") || meta || staticFindings.length > 0) && (
               <div style={{ ...styles.card, padding: 16, background: "#000000" }}>
                 <CornerCrosses />
-                <div style={{ display: "flex", justifySpace: "space-between", justifyContent: "space-between", alignItems: "center", marginBottom: 14 }}>
+                <div style={{ display: "flex",  justifyContent: "space-between", alignItems: "center", marginBottom: 14 }}>
                   <span style={{ fontSize: 9, color: "#ffd900", letterSpacing: "2.5px", fontWeight: 700, fontFamily: "'Cousine', monospace" }}>
                     [ ANALYSIS_TELEMETRY_INDICES ]
                   </span>
@@ -1977,7 +1929,7 @@ export default function Page() {
                   <div style={{ flex: 1, display: "flex", flexDirection: "column", gap: 5, fontSize: 9.5, fontFamily: "'Cousine', monospace" }}>
                     {/* Security metric */}
                     <div>
-                      <div style={{ display: "flex", justifySpace: "space-between", justifyContent: "space-between", marginBottom: 2 }}>
+                      <div style={{ display: "flex",  justifyContent: "space-between", marginBottom: 2 }}>
                         <span>SECURITY INDEX</span>
                         <span style={{ color: scores.security > 80 ? "#06d6a0" : "#ff4d6d" }}>
                           {scores.security}% {getDelta('security') !== null && (getDelta('security') >= 0 ? `(+${getDelta('security')}%)` : `(${getDelta('security')}%)`)}
@@ -1990,7 +1942,7 @@ export default function Page() {
 
                     {/* Privacy metric */}
                     <div>
-                      <div style={{ display: "flex", justifySpace: "space-between", justifyContent: "space-between", marginBottom: 2 }}>
+                      <div style={{ display: "flex",  justifyContent: "space-between", marginBottom: 2 }}>
                         <span>PRIVACY ALIGNMENT</span>
                         <span style={{ color: scores.privacy > 80 ? "#06d6a0" : "#a855f7" }}>
                           {scores.privacy}% {getDelta('privacy') !== null && (getDelta('privacy') >= 0 ? `(+${getDelta('privacy')}%)` : `(${getDelta('privacy')}%)`)}
@@ -2003,7 +1955,7 @@ export default function Page() {
 
                     {/* Quality metric */}
                     <div>
-                      <div style={{ display: "flex", justifySpace: "space-between", justifyContent: "space-between", marginBottom: 2 }}>
+                      <div style={{ display: "flex",  justifyContent: "space-between", marginBottom: 2 }}>
                         <span>CODE MAINTAINABILITY</span>
                         <span style={{ color: scores.maintainability > 80 ? "#06d6a0" : "#ffd166" }}>
                           {scores.maintainability}% {getDelta('maintainability') !== null && (getDelta('maintainability') >= 0 ? `(+${getDelta('maintainability')}%)` : `(${getDelta('maintainability')}%)`)}
@@ -2023,7 +1975,7 @@ export default function Page() {
             {simulatingExploit && (
               <div style={{ ...styles.card, padding: 16, background: "#060303", border: "1px solid #ff4d6d" }}>
                 <CornerCrosses />
-                <div style={{ display: "flex", alignItems: "center", justifySpace: "space-between", justifyContent: "space-between", marginBottom: 10, borderBottom: "1px solid rgba(255, 77, 109, 0.2)", paddingBottom: 6 }}>
+                <div style={{ display: "flex", alignItems: "center",  justifyContent: "space-between", marginBottom: 10, borderBottom: "1px solid rgba(255, 77, 109, 0.2)", paddingBottom: 6 }}>
                   <span style={{ fontSize: 9, color: "#ff4d6d", letterSpacing: "2px", fontWeight: 700, fontFamily: "'Cousine', monospace" }}>
                     [ EXPLOIT PATH ATTACK VECTOR SIMULATOR ]
                   </span>
@@ -2093,7 +2045,7 @@ export default function Page() {
                 </div>
                 <div style={{ display: "flex", flexDirection: "column", gap: 8, fontSize: 10, fontFamily: "'Cousine', monospace" }}>
                   {history.map((h, i) => (
-                    <div key={h.id} style={{ display: "flex", alignItems: "center", justifySpace: "space-between", justifyContent: "space-between", borderBottom: i < history.length - 1 ? "1px solid rgba(255,255,255,0.05)" : "none", paddingBottom: 6 }}>
+                    <div key={h.id} style={{ display: "flex", alignItems: "center",  justifyContent: "space-between", borderBottom: i < history.length - 1 ? "1px solid rgba(255,255,255,0.05)" : "none", paddingBottom: 6 }}>
                       <span style={{ color: "#ffffff" }}>#{history.length - i} [{h.timestamp}] ({h.language})</span>
                       <span style={{ color: h.scores.readiness > 80 ? "#06d6a0" : "#ff4d6d" }}>
                         Readiness: {h.scores.readiness}% ({h.issues} issues)

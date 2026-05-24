@@ -1,8 +1,9 @@
 import { exec } from "child_process";
 import * as acorn from "acorn";
+import { rateLimit } from "../limiter";
 
 // Helper to execute a python script for AST compilation
-async function parsePythonAST(code) {
+async function parsePythonAST(code: string): Promise<any> {
   return new Promise((resolve) => {
     // Write python code snippet to parse via stdin
     const pythonScript = `
@@ -128,17 +129,17 @@ if __name__ == '__main__':
       }
     });
 
-    child.stdin.write(code);
-    child.stdin.end();
+    child.stdin!.write(code);
+    child.stdin!.end();
   });
 }
 
-function parseJS(code) {
+function parseJS(code: string): any {
   try {
-    const parsed = acorn.parse(code, { ecmaVersion: 2022, sourceType: "module", locations: true });
-    const body = [];
+    const parsed = acorn.parse(code, { ecmaVersion: 2022, sourceType: "module", locations: true }) as any;
+    const body: any[] = [];
 
-    parsed.body.forEach(node => {
+    parsed.body.forEach((node: any) => {
       const line = node.loc ? node.loc.start.line : 1;
       
       if (node.type === "ImportDeclaration") {
@@ -146,30 +147,30 @@ function parseJS(code) {
           type: "ImportDeclaration",
           line,
           source: node.source.value,
-          specifiers: node.specifiers.map(s => s.local?.name || "import")
+          specifiers: node.specifiers.map((s: any) => s.local?.name || "import")
         });
       } else if (node.type === "FunctionDeclaration") {
         body.push({
           type: "FunctionDeclaration",
           line,
           id: node.id ? node.id.name : "anonymous",
-          params: node.params.map(p => p.name || p.left?.name || "param")
+          params: node.params.map((p: any) => p.name || p.left?.name || "param")
         });
       } else if (node.type === "VariableDeclaration") {
-        node.declarations.forEach(decl => {
+        node.declarations.forEach((decl: any) => {
           const declLine = decl.loc ? decl.loc.start.line : line;
           let initSnippet = "assign";
           if (decl.init) {
             initSnippet = code.substring(decl.init.start, decl.init.end);
           }
           // extract left hand side variables
-          const getLhsNames = (idNode) => {
+          const getLhsNames = (idNode: any): string[] => {
             if (idNode.type === "Identifier") return [idNode.name];
             if (idNode.type === "ObjectPattern") {
-              return idNode.properties.map(p => p.value?.name || p.key?.name).filter(Boolean);
+              return idNode.properties.map((p: any) => p.value?.name || p.key?.name).filter(Boolean);
             }
             if (idNode.type === "ArrayPattern") {
-              return idNode.elements.map(el => el?.name).filter(Boolean);
+              return idNode.elements.map((el: any) => el?.name).filter(Boolean);
             }
             return ["var"];
           };
@@ -190,7 +191,7 @@ function parseJS(code) {
           type: "CallExpression",
           line,
           callee,
-          arguments: node.expression.arguments.map(arg => code.substring(arg.start, arg.end)).slice(0, 3)
+          arguments: node.expression.arguments.map((arg: any) => code.substring(arg.start, arg.end)).slice(0, 3)
         });
       } else {
         body.push({
@@ -206,7 +207,7 @@ function parseJS(code) {
       sourceType: "module",
       body: body.length > 0 ? body : [{ type: "EmptyJavaScriptProgram", line: 1 }]
     };
-  } catch (e) {
+  } catch (e: any) {
     return {
       type: "Program",
       sourceType: "module",
@@ -215,7 +216,16 @@ function parseJS(code) {
   }
 }
 
-export async function POST(req) {
+export async function POST(req: Request) {
+  const ip = req.headers.get("x-forwarded-for") || req.headers.get("x-real-ip") || "127.0.0.1";
+  
+  if (!rateLimit(ip, 30)) {
+    return new Response(JSON.stringify({ error: "Rate limit exceeded. Maximum 30 requests per minute." }), {
+      status: 429,
+      headers: { "Content-Type": "application/json" }
+    });
+  }
+
   try {
     const { code, language } = await req.json();
     if (!code) {
@@ -234,7 +244,7 @@ export async function POST(req) {
     return new Response(JSON.stringify(astResult), {
       headers: { "Content-Type": "application/json" }
     });
-  } catch (err) {
+  } catch (err: any) {
     return new Response(JSON.stringify({ error: err.message }), { status: 500 });
   }
 }
