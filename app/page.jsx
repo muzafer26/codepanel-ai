@@ -92,7 +92,72 @@ const AGENTS = [
   { id: "compliance", name: "Privacy Shield", icon: "🛡", color: "#a855f7", dim: "rgba(168, 85, 247, 0.05)", border: "rgba(168, 85, 247, 0.25)", desc: "Detects HIPAA, PCI-DSS, and GDPR violations and maps PII leakage flow." },
 ];
 
-// Client-side Rule-based Static Scanner
+// Structural AST compilation logic (ESTree Mock client-side parser)
+function generateASTTree(code) {
+  if (!code) return null;
+  const lines = code.split('\n');
+  const body = [];
+
+  lines.forEach((line, idx) => {
+    const trimmed = line.trim();
+    if (!trimmed) return;
+
+    // Check imports
+    const importMatch = trimmed.match(/(?:import\s+(.*)\s+from\s+['"]|const\s+(.*)\s+=\s+require\(\s*['"])([@a-zA-Z0-9_\-\/]+)/);
+    if (importMatch) {
+      body.push({
+        type: "ImportDeclaration",
+        line: idx + 1,
+        source: importMatch[3],
+        specifiers: (importMatch[1] || importMatch[2] || "").replace(/[{}]/g, "").split(",").map(s => s.trim())
+      });
+      return;
+    }
+
+    // Check Function Declarations
+    const funcMatch = trimmed.match(/(?:function|def)\s+([a-zA-Z0-9_$]+)\s*\((.*)\)/);
+    if (funcMatch) {
+      body.push({
+        type: "FunctionDeclaration",
+        line: idx + 1,
+        id: funcMatch[1],
+        params: funcMatch[2].split(",").map(p => p.trim()).filter(Boolean)
+      });
+      return;
+    }
+
+    // Check variable assignments
+    const varMatch = trimmed.match(/(?:const|let|var)\s+([a-zA-Z0-9_$]+)\s*=\s*(.*)/);
+    if (varMatch) {
+      body.push({
+        type: "VariableDeclarator",
+        line: idx + 1,
+        id: varMatch[1],
+        init: varMatch[2].substring(0, 45) + (varMatch[2].length > 45 ? "..." : "")
+      });
+      return;
+    }
+
+    // Check function calls
+    const callMatch = trimmed.match(/\b(console\.log|fetch|axios|db\.execute|query|print|logger)\((.*)\)/);
+    if (callMatch) {
+      body.push({
+        type: "CallExpression",
+        line: idx + 1,
+        callee: callMatch[1],
+        arguments: callMatch[2].split(",").map(a => a.trim()).slice(0, 3)
+      });
+    }
+  });
+
+  return {
+    type: "Program",
+    sourceType: "module",
+    body: body.length > 0 ? body : [{ type: "EmptyProgram", line: 1 }]
+  };
+}
+
+// Client-side Rule-based Static Heuristics Scanner
 function runStaticScanner(code) {
   const findings = [];
   if (!code) return findings;
@@ -133,6 +198,20 @@ function runStaticScanner(code) {
       title: 'Unencrypted Transmission',
       regex: /fetch\(\s*['"]http:\/\/[a-zA-Z0-9_\-\.]+/i,
       desc: 'Transmitting sensitive variables via unencrypted HTTP protocols. Enforce HTTPS.'
+    },
+    {
+      id: 'static-redos',
+      severity: 'MEDIUM',
+      title: 'ReDoS Vulnerability (Dangerous RegExp)',
+      regex: /([a-zA-Z0-9_\-|]+[\*+])+[\*+]/i,
+      desc: 'Detected potential nested repeating groups in regex. Vulnerable to Regular Expression Denial of Service (ReDoS) from backtracking.'
+    },
+    {
+      id: 'static-sync-block',
+      severity: 'HIGH',
+      title: 'Blocking Sync Operation',
+      regex: /\b(readFileSync|writeFileSync|execSync|spawnSync)\b/i,
+      desc: 'Blocking synchronous call halts thread execution in Node.js event loops. Transition to non-blocking async functions.'
     }
   ];
 
@@ -150,6 +229,31 @@ function runStaticScanner(code) {
       }
     });
   });
+
+  // Dynamic Dependency Scan
+  const importRegex = /(?:import\s+.*\s+from\s+['"]|require\(\s*['"])([@a-zA-Z0-9_\-\/]+)/g;
+  let match;
+  const vulnPacks = {
+    'lodash': { msg: 'Prototype Pollution (CVE-2020-8203) - upgrade to >= 4.17.21', severity: 'HIGH' },
+    'axios': { msg: 'Server-Side Request Forgery (SSRF) (CVE-2020-28168) - upgrade to >= 0.21.1', severity: 'HIGH' },
+    'express': { msg: 'Open Redirect & Parameter Pollution - upgrade to >= 4.16.0', severity: 'MEDIUM' },
+    'moment': { msg: 'ReDoS Vulnerability (CVE-2022-31129) - upgrade to >= 2.29.4', severity: 'MEDIUM' },
+    'minimist': { msg: 'Prototype Pollution (CVE-2021-3545) - upgrade to >= 1.2.6', severity: 'HIGH' }
+  };
+
+  while ((match = importRegex.exec(code)) !== null) {
+    const packName = match[1];
+    if (vulnPacks[packName]) {
+      findings.push({
+        id: `static-dep-${packName}`,
+        severity: vulnPacks[packName].severity,
+        title: `Outdated Dependency: ${packName}`,
+        line: 'Manifest',
+        desc: vulnPacks[packName].msg,
+        snippet: `Imported library: ${packName}`
+      });
+    }
+  }
 
   return findings;
 }
@@ -464,7 +568,7 @@ function PrivacyFlowCanvas({ code, reportText, status }) {
 
     return () => {
       window.removeEventListener('resize', handleResize);
-      canvas.removeMouseMoveListener || canvas.removeEventListener('mousemove', handleMouseMove);
+      canvas.removeEventListener('mousemove', handleMouseMove);
       cancelAnimationFrame(animationRef.current);
     };
   }, [code, status]);
@@ -488,7 +592,41 @@ function PrivacyFlowCanvas({ code, reportText, status }) {
   );
 }
 
-// Enterprise dynamic score compiler
+// Collapsible AST view component
+function ASTExplorer({ ast }) {
+  if (!ast) return <div style={{ color: "rgba(255,255,255,0.2)", fontStyle: "italic", padding: 16 }}>[ Ingest source buffer to compile structural syntax tree ]</div>;
+  
+  return (
+    <div style={{ padding: 16, fontFamily: "'JetBrains Mono', monospace", fontSize: 10.5, color: "#8b949e", lineHeight: 1.6, overflowY: "auto", maxHeight: 220 }}>
+      <div style={{ color: "#06d6a0" }}>{"{"}</div>
+      <div style={{ paddingLeft: 14 }}>
+        <div><span style={{ color: "#ff4d6d" }}>"type"</span>: <span style={{ color: "#ffd166" }}>"{ast.type}"</span>,</div>
+        <div><span style={{ color: "#ff4d6d" }}>"sourceType"</span>: <span style={{ color: "#ffd166" }}>"{ast.sourceType}"</span>,</div>
+        <div><span style={{ color: "#ff4d6d" }}>"body"</span>: [</div>
+        <div style={{ paddingLeft: 14 }}>
+          {ast.body.map((node, i) => (
+            <div key={i} style={{ marginBottom: 6, borderLeft: "1px dashed rgba(255,217,0,0.15)", paddingLeft: 8 }}>
+              <span style={{ color: "#06d6a0" }}>{"{"}</span>
+              <div style={{ paddingLeft: 14 }}>
+                <div><span style={{ color: "#58a6ff" }}>"type"</span>: <span style={{ color: "#ffd166" }}>"{node.type}"</span>,</div>
+                <div><span style={{ color: "#58a6ff" }}>"line"</span>: <span style={{ color: "#ffffff" }}>{node.line}</span>,</div>
+                {node.id && <div><span style={{ color: "#58a6ff" }}>"id"</span>: <span style={{ color: "#ffffff" }}>"{node.id}"</span>,</div>}
+                {node.source && <div><span style={{ color: "#58a6ff" }}>"source"</span>: <span style={{ color: "#ffd166" }}>"{node.source}"</span>,</div>}
+                {node.params && <div><span style={{ color: "#58a6ff" }}>"params"</span>: <span style={{ color: "#06d6a0" }}>{JSON.stringify(node.params)}</span>,</div>}
+                {node.init && <div><span style={{ color: "#58a6ff" }}>"init"</span>: <span style={{ color: "#ffd166" }}>"{node.init}"</span>,</div>}
+                {node.callee && <div><span style={{ color: "#58a6ff" }}>"callee"</span>: <span style={{ color: "#ff4d6d" }}>"{node.callee}"</span>,</div>}
+              </div>
+              <span style={{ color: "#06d6a0" }}>{"}"}</span>{i < ast.body.length - 1 ? "," : ""}
+            </div>
+          ))}
+        </div>
+        <div>]</div>
+      </div>
+      <div style={{ color: "#06d6a0" }}>{"}"}</div>
+    </div>
+  );
+}
+
 function calculateMultiScoring(code, panels, staticFindings) {
   let security = 100;
   let privacy = 100;
@@ -583,17 +721,18 @@ export default function Page() {
   const [showDiff, setShowDiff] = useState(false);
   const [fixedCode, setFixedCode] = useState("");
 
-  // Scan History and Static Scan states
+  const [editorTab, setEditorTab] = useState("buffer"); // "buffer" or "ast"
   const [staticFindings, setStaticFindings] = useState([]);
   const [history, setHistory] = useState([]);
   const [showArchModal, setShowArchModal] = useState(false);
 
-  // Attack Exploit Simulator States
+  // Pipeline execution tracking phases: "idle" -> "heuristics" -> "agents" -> "meta" -> "done"
+  const [pipelinePhase, setPipelinePhase] = useState("idle");
+
   const [exploitLog, setExploitLog] = useState([]);
   const [simulatingExploit, setSimulatingExploit] = useState(false);
-  const [exploitType, setExploitType] = useState(null); // "sqli" or "leak"
+  const [exploitType, setExploitType] = useState(null); 
 
-  // Landing Page Interactive Simulation States
   const [simRunning, setSimRunning] = useState(false);
   const [simProgress, setSimProgress] = useState(0);
   const [simLogs, setSimLogs] = useState([]);
@@ -607,7 +746,6 @@ export default function Page() {
   };
   const metaRef = useRef(null);
 
-  // Load history from local storage
   useEffect(() => {
     const saved = localStorage.getItem("codepanel_scan_history");
     if (saved) {
@@ -615,7 +753,6 @@ export default function Page() {
     }
   }, []);
 
-  // Compute Static findings immediately upon code edits
   useEffect(() => {
     if (code.trim()) {
       const findings = runStaticScanner(code);
@@ -637,6 +774,7 @@ export default function Page() {
     setSimulatingExploit(false);
     setExploitLog([]);
     setExploitType(null);
+    setPipelinePhase("idle");
   }, []);
 
   const runLandingSimulation = () => {
@@ -670,7 +808,6 @@ export default function Page() {
     }, 700);
   };
 
-  // Exploit simulator trigger
   const triggerExploitSimulation = (type) => {
     setSimulatingExploit(true);
     setExploitType(type);
@@ -712,6 +849,13 @@ export default function Page() {
     if (!code.trim() || reviewing) return;
     reset();
     setReviewing(true);
+
+    // Phase 1: Local Static scans
+    setPipelinePhase("heuristics");
+    await new Promise((resolve) => setTimeout(resolve, 800));
+
+    // Phase 2: AI Orchestrated scanning
+    setPipelinePhase("agents");
     setStatus({ security: "scanning", performance: "scanning", style: "scanning", compliance: "scanning" });
 
     const results = {};
@@ -756,6 +900,8 @@ export default function Page() {
     try {
       await Promise.all(AGENTS.map((agent, idx) => runAgent(agent, idx)));
 
+      // Phase 3: Meta synthesis review compiling
+      setPipelinePhase("meta");
       setMetaStatus("synthesizing");
       
       try {
@@ -785,12 +931,13 @@ export default function Page() {
         }
 
         setMetaStatus("done");
+        setPipelinePhase("done");
+        
         const parsedFix = extractFixedCode(finalMeta);
         if (parsedFix) {
           setFixedCode(parsedFix);
         }
 
-        // Save metrics to history
         const finalFindings = runStaticScanner(code);
         const finalScores = calculateMultiScoring(code, results, finalFindings);
         const nextScan = {
@@ -854,6 +1001,7 @@ export default function Page() {
   }, [startReview, reset, fixedCode, viewMode]);
 
   const scores = calculateMultiScoring(code, panels, staticFindings);
+  const astTree = generateASTTree(code);
 
   const getDelta = (metric) => {
     if (history.length < 2) return null;
@@ -1108,7 +1256,7 @@ export default function Page() {
                 )}
               </div>
               
-              <div style={{ padding: 16, background: "#030303", display: "flex", flexDirection: "column", justifyContent: "space-between" }}>
+              <div style={{ padding: 16, background: "#030303", display: "flex", flexDirection: "column", justifySpace: "space-between", justifyContent: "space-between" }}>
                 <div style={{ fontFamily: "'Cousine', monospace", fontSize: 10, lineHeight: 1.8, color: "#ffffff" }}>
                   <div style={{ color: "rgba(255,255,255,0.3)", marginBottom: 8 }}>// MOCK VERDICT OUTPUT:</div>
                   {simLogs.length === 0 && (
@@ -1127,7 +1275,7 @@ export default function Page() {
                   {simRunning && <span style={{ display: "inline-block", width: 6, height: 11, background: "#ffd900", marginLeft: 2, animation: "blink 1s step-end infinite" }} />}
                 </div>
 
-                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", borderTop: "1px solid rgba(255, 217, 0, 0.12)", paddingTop: 12, marginTop: 12 }}>
+                <div style={{ display: "flex", alignItems: "center", justifySpace: "space-between", justifyContent: "space-between", borderTop: "1px solid rgba(255, 217, 0, 0.12)", paddingTop: 12, marginTop: 12 }}>
                   <button onClick={runLandingSimulation} disabled={simRunning} className="btn-block-yellow" style={{ ...styles.btn(true), padding: "8px 20px", fontSize: 9, opacity: simRunning ? 0.6 : 1 }}>
                     {simRunning ? "[ RUNNING SIMULATION... ]" : "[ SIMULATE LIVE AUDIT ]"}
                   </button>
@@ -1152,7 +1300,7 @@ export default function Page() {
 
         {/* Feature Bento Matrix */}
         <div id="feature-anchor" style={{ width: "100%", maxWidth: 1040, padding: "0 24px", boxSizing: "border-box", zIndex: 2 }}>
-          <div style={{ display: "flex", justifyContent: "space-between", borderBottom: "1px solid rgba(255, 217, 0, 0.15)", paddingBottom: 16, marginBottom: 28 }}>
+          <div style={{ display: "flex", justifySpace: "space-between", justifyContent: "space-between", borderBottom: "1px solid rgba(255, 217, 0, 0.15)", paddingBottom: 16, marginBottom: 28 }}>
             <span style={{ fontSize: 11, fontFamily: "'Cousine', monospace", color: "#ffd900", letterSpacing: "2.5px" }}>[ SYSTEM SECURITY SPECIFICATIONS ]</span>
             <span style={{ fontSize: 9, fontFamily: "'Cousine', monospace", color: "rgba(255,255,255,0.3)" }}>// ENTERPRISE PIPELINE // ACTIVE</span>
           </div>
@@ -1218,7 +1366,7 @@ export default function Page() {
           <div style={{ position: "fixed", top: 0, left: 0, right: 0, bottom: 0, background: "rgba(0,0,0,0.85)", zIndex: 1000, display: "flex", alignItems: "center", justifyContent: "center", padding: 20 }}>
             <div style={{ background: "#000000", border: "1px solid #ffd900", padding: 32, maxWidth: 840, width: "100%", position: "relative", fontFamily: "'Inter', sans-serif" }}>
               <CornerCrosses />
-              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", borderBottom: "1px solid rgba(255, 217, 0, 0.2)", paddingBottom: 16, marginBottom: 24 }}>
+              <div style={{ display: "flex", justifySpace: "space-between", justifyContent: "space-between", alignItems: "center", borderBottom: "1px solid rgba(255, 217, 0, 0.2)", paddingBottom: 16, marginBottom: 24 }}>
                 <span style={{ fontSize: 11, color: "#ffd900", fontFamily: "'Cousine', monospace", letterSpacing: "2.5px" }}>[ HYBRID SYSTEM ARCHITECTURE EXPLORER ]</span>
                 <button onClick={() => setShowArchModal(false)} style={{ background: "none", border: "none", color: "#ffd900", cursor: "pointer", fontSize: 10, fontFamily: "'Cousine', monospace" }}>✕ CLOSE</button>
               </div>
@@ -1312,26 +1460,73 @@ export default function Page() {
 
       <div style={{ flex: 1, padding: "20px 40px", display: "flex", flexDirection: "column", gap: 16, width: "100%", boxSizing: "border-box" }}>
 
+        {/* Dynamic Scan Execution Pipeline Stepper */}
+        <div style={{ ...styles.card, padding: "10px 16px", background: "#050505", display: "flex", justifySpace: "space-between", justifyContent: "space-between", alignItems: "center" }}>
+          <span style={{ fontSize: 8.5, fontFamily: "'Cousine', monospace", color: "#ffd900", letterSpacing: "2px" }}>
+            [ ANALYSIS_PIPELINE_STATUS ]
+          </span>
+          <div style={{ display: "flex", gap: 12, fontFamily: "'Cousine', monospace", fontSize: 9 }}>
+            {[
+              { phase: "heuristics", label: "01 / HEURISTICS" },
+              { phase: "agents", label: "02 / AGENT_GRID" },
+              { phase: "meta", label: "03 / SYNTHESIS" },
+              { phase: "done", label: "04 / VERDICT" }
+            ].map((p, i) => {
+              const isActive = pipelinePhase === p.phase;
+              const isPassed = (pipelinePhase === "done") || 
+                               (p.phase === "heuristics" && ["agents", "meta", "done"].includes(pipelinePhase)) ||
+                               (p.phase === "agents" && ["meta", "done"].includes(pipelinePhase)) ||
+                               (p.phase === "meta" && pipelinePhase === "done");
+              
+              return (
+                <div key={p.phase} style={{ 
+                  display: "flex", 
+                  alignItems: "center", 
+                  gap: 6,
+                  color: isActive ? "#ffd900" : (isPassed ? "#06d6a0" : "rgba(255,255,255,0.2)"),
+                  fontWeight: isActive ? 800 : 400
+                }}>
+                  <span>{p.label}</span>
+                  {i < 3 && <span style={{ color: "rgba(255,255,255,0.15)" }}>➔</span>}
+                </div>
+              );
+            })}
+          </div>
+        </div>
+
         {/* Master Bento Layout Columns */}
         <div className="cipher-dashboard-grid">
           
-          {/* LEFT SECTION: Editor, static scans, and agent terminals */}
+          {/* LEFT SECTION */}
           <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
             
             {/* Input Editor Box */}
             <div style={styles.card}>
               <CornerCrosses />
-              <div style={{ padding: "10px 16px", borderBottom: "1px solid rgba(255, 217, 0, 0.15)", display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap", background: "#050505" }}>
-                <span style={{ fontSize: 9, color: "#ffd900", letterSpacing: "2.5px", fontWeight: 700, fontFamily: "'Cousine', monospace" }}>[ CELL_01 / SOURCE_INGESTION_BUFFER ]</span>
-                
-                <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginLeft: 16 }}>
-                  {EXAMPLES.map((ex) => (
-                    <button key={ex.label} onClick={() => { setCode(ex.code); setLanguage(ex.language); reset(); }}
-                      style={{ ...styles.btn(false), padding: "4px 10px", fontSize: 8 }}>
-                      {ex.label}
-                    </button>
-                  ))}
+              
+              {/* Tab selector between code buffer and AST tree */}
+              <div style={{ padding: "8px 16px", borderBottom: "1px solid rgba(255, 217, 0, 0.15)", display: "flex", gap: 12, alignItems: "center", flexWrap: "wrap", background: "#050505" }}>
+                <div style={{ display: "flex", border: "1px solid rgba(255, 217, 0, 0.2)", marginRight: 8 }}>
+                  <button onClick={() => setEditorTab("buffer")}
+                    style={{ background: editorTab === "buffer" ? "rgba(255, 217, 0, 0.12)" : "transparent", border: "none", color: editorTab === "buffer" ? "#ffd900" : "#8b949e", fontSize: 9, padding: "4px 12px", cursor: "pointer", fontWeight: 700, fontFamily: "'Cousine', monospace" }}>
+                    SOURCE_INGESTION_BUFFER
+                  </button>
+                  <button onClick={() => setEditorTab("ast")}
+                    style={{ background: editorTab === "ast" ? "rgba(255, 217, 0, 0.12)" : "transparent", border: "none", borderLeft: "1px solid rgba(255, 217, 0, 0.2)", color: editorTab === "ast" ? "#ffd900" : "#8b949e", fontSize: 9, padding: "4px 12px", cursor: "pointer", fontWeight: 700, fontFamily: "'Cousine', monospace" }}>
+                    AST_STRUCTURAL_TREE
+                  </button>
                 </div>
+                
+                {editorTab === "buffer" && (
+                  <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+                    {EXAMPLES.map((ex) => (
+                      <button key={ex.label} onClick={() => { setCode(ex.code); setLanguage(ex.language); reset(); }}
+                        style={{ ...styles.btn(false), padding: "4px 10px", fontSize: 8 }}>
+                        {ex.label}
+                      </button>
+                    ))}
+                  </div>
+                )}
                 
                 <select value={language} onChange={(e) => setLanguage(e.target.value)}
                   className="control-select"
@@ -1340,33 +1535,38 @@ export default function Page() {
                 </select>
               </div>
 
-              <div style={{ display: "flex", background: "#000000", borderBottom: "1px solid rgba(255, 217, 0, 0.15)", minHeight: 200 }}>
-                {/* Line Numbers */}
-                <div style={{
-                  width: 32,
-                  borderRight: "1px solid rgba(255, 217, 0, 0.12)",
-                  padding: "16px 0",
-                  textAlign: "right",
-                  color: "rgba(255, 217, 0, 0.3)",
-                  fontFamily: "'JetBrains Mono', monospace",
-                  fontSize: 11,
-                  lineHeight: 1.7,
-                  userSelect: "none",
-                  background: "#030303"
-                }}>
-                  {Array.from({ length: Math.max(10, code.split('\n').length) }).map((_, i) => (
-                    <div key={i} style={{ paddingRight: 8 }}>{i + 1}</div>
-                  ))}
-                </div>
+              {editorTab === "buffer" ? (
+                <div style={{ display: "flex", background: "#000000", borderBottom: "1px solid rgba(255, 217, 0, 0.15)", minHeight: 200 }}>
+                  <div style={{
+                    width: 32,
+                    borderRight: "1px solid rgba(255, 217, 0, 0.12)",
+                    padding: "16px 0",
+                    textAlign: "right",
+                    color: "rgba(255, 217, 0, 0.3)",
+                    fontFamily: "'JetBrains Mono', monospace",
+                    fontSize: 11,
+                    lineHeight: 1.7,
+                    userSelect: "none",
+                    background: "#030303"
+                  }}>
+                    {Array.from({ length: Math.max(10, code.split('\n').length) }).map((_, i) => (
+                      <div key={i} style={{ paddingRight: 8 }}>{i + 1}</div>
+                    ))}
+                  </div>
 
-                <textarea value={code} onChange={(e) => { setCode(e.target.value); reset(); }}
-                  placeholder="// Paste your source code variables configuration here for validation..."
-                  style={{ flex: 1, padding: 16, background: "transparent", border: "none", outline: "none", color: "#ffffff", fontSize: 12, lineHeight: 1.7, fontFamily: "'JetBrains Mono', monospace", resize: "vertical", boxSizing: "border-box" }} />
-              </div>
+                  <textarea value={code} onChange={(e) => { setCode(e.target.value); reset(); }}
+                    placeholder="// Paste your source code variables configuration here for validation..."
+                    style={{ flex: 1, padding: 16, background: "transparent", border: "none", outline: "none", color: "#ffffff", fontSize: 12, lineHeight: 1.7, fontFamily: "'JetBrains Mono', monospace", resize: "vertical", boxSizing: "border-box" }} />
+                </div>
+              ) : (
+                <div style={{ background: "#000000", borderBottom: "1px solid rgba(255, 217, 0, 0.15)", minHeight: 200 }}>
+                  <ASTExplorer ast={astTree} />
+                </div>
+              )}
 
               <div style={{ padding: "10px 16px", borderTop: "none", display: "flex", gap: 10, alignItems: "center", background: "#050505" }}>
                 <button onClick={startReview} disabled={!code.trim() || reviewing} className="btn-block-yellow"
-                  style={{ ...styles.btn(primary => true), opacity: !code.trim() || reviewing ? 0.5 : 1, cursor: !code.trim() || reviewing ? "not-allowed" : "pointer" }}>
+                  style={{ ...styles.btn(true), opacity: !code.trim() || reviewing ? 0.5 : 1, cursor: !code.trim() || reviewing ? "not-allowed" : "pointer" }}>
                   {reviewing ? "[ RUNNING AUDIT PIPELINE... ]" : "[ EXECUTE AGENT MATRIX ]"}
                 </button>
                 
@@ -1382,7 +1582,7 @@ export default function Page() {
             {staticFindings.length > 0 && (
               <div style={{ ...styles.card, padding: 16, background: "#050000", border: "1px solid rgba(255, 77, 109, 0.4)" }}>
                 <CornerCrosses />
-                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
+                <div style={{ display: "flex", alignItems: "center", justifySpace: "space-between", justifyContent: "space-between", marginBottom: 10 }}>
                   <span style={{ fontSize: 9, color: "#ff4d6d", letterSpacing: "2.5px", fontWeight: 700, fontFamily: "'Cousine', monospace" }}>
                     [ HEURISTICS PRE-SCAN EXPOSURE DETECTED (0ms) ]
                   </span>
@@ -1399,7 +1599,7 @@ export default function Page() {
                 <div style={{ display: "flex", flexDirection: "column", gap: 10, fontFamily: "'Cousine', monospace", fontSize: 10.5 }}>
                   {staticFindings.map((f, i) => (
                     <div key={i} style={{ borderBottom: i < staticFindings.length - 1 ? "1px dashed rgba(255, 77, 109, 0.15)" : "none", paddingBottom: 8 }}>
-                      <div style={{ display: "flex", justifyContent: "space-between", color: f.severity === 'CRITICAL' ? '#ff4d6d' : '#ffd166', fontWeight: 700 }}>
+                      <div style={{ display: "flex", alignItems: "center", justifySpace: "space-between", justifyContent: "space-between", color: f.severity === 'CRITICAL' ? '#ff4d6d' : '#ffd166', fontWeight: 700 }}>
                         <span>● {f.title} (Line {f.line})</span>
                         <span>{f.severity} // 92% CONFIDENCE</span>
                       </div>
@@ -1542,7 +1742,7 @@ export default function Page() {
                   <div style={{ flex: 1, display: "flex", flexDirection: "column", gap: 5, fontSize: 9.5, fontFamily: "'Cousine', monospace" }}>
                     {/* Security metric */}
                     <div>
-                      <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 2 }}>
+                      <div style={{ display: "flex", justifySpace: "space-between", justifyContent: "space-between", marginBottom: 2 }}>
                         <span>SECURITY INDEX</span>
                         <span style={{ color: scores.security > 80 ? "#06d6a0" : "#ff4d6d" }}>
                           {scores.security}% {getDelta('security') !== null && (getDelta('security') >= 0 ? `(+${getDelta('security')}%)` : `(${getDelta('security')}%)`)}
@@ -1555,7 +1755,7 @@ export default function Page() {
 
                     {/* Privacy metric */}
                     <div>
-                      <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 2 }}>
+                      <div style={{ display: "flex", justifySpace: "space-between", justifyContent: "space-between", marginBottom: 2 }}>
                         <span>PRIVACY ALIGNMENT</span>
                         <span style={{ color: scores.privacy > 80 ? "#06d6a0" : "#a855f7" }}>
                           {scores.privacy}% {getDelta('privacy') !== null && (getDelta('privacy') >= 0 ? `(+${getDelta('privacy')}%)` : `(${getDelta('privacy')}%)`)}
@@ -1568,7 +1768,7 @@ export default function Page() {
 
                     {/* Quality metric */}
                     <div>
-                      <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 2 }}>
+                      <div style={{ display: "flex", justifySpace: "space-between", justifyContent: "space-between", marginBottom: 2 }}>
                         <span>CODE MAINTAINABILITY</span>
                         <span style={{ color: scores.maintainability > 80 ? "#06d6a0" : "#ffd166" }}>
                           {scores.maintainability}% {getDelta('maintainability') !== null && (getDelta('maintainability') >= 0 ? `(+${getDelta('maintainability')}%)` : `(${getDelta('maintainability')}%)`)}
@@ -1588,7 +1788,7 @@ export default function Page() {
             {simulatingExploit && (
               <div style={{ ...styles.card, padding: 16, background: "#060303", border: "1px solid #ff4d6d" }}>
                 <CornerCrosses />
-                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10, borderBottom: "1px solid rgba(255, 77, 109, 0.2)", paddingBottom: 6 }}>
+                <div style={{ display: "flex", alignItems: "center", justifySpace: "space-between", justifyContent: "space-between", marginBottom: 10, borderBottom: "1px solid rgba(255, 77, 109, 0.2)", paddingBottom: 6 }}>
                   <span style={{ fontSize: 9, color: "#ff4d6d", letterSpacing: "2px", fontWeight: 700, fontFamily: "'Cousine', monospace" }}>
                     [ EXPLOIT PATH ATTACK VECTOR SIMULATOR ]
                   </span>
@@ -1658,7 +1858,7 @@ export default function Page() {
                 </div>
                 <div style={{ display: "flex", flexDirection: "column", gap: 8, fontSize: 10, fontFamily: "'Cousine', monospace" }}>
                   {history.map((h, i) => (
-                    <div key={h.id} style={{ display: "flex", justifyContent: "space-between", borderBottom: i < history.length - 1 ? "1px solid rgba(255,255,255,0.05)" : "none", paddingBottom: 6 }}>
+                    <div key={h.id} style={{ display: "flex", alignItems: "center", justifySpace: "space-between", justifyContent: "space-between", borderBottom: i < history.length - 1 ? "1px solid rgba(255,255,255,0.05)" : "none", paddingBottom: 6 }}>
                       <span style={{ color: "#ffffff" }}>#{history.length - i} [{h.timestamp}] ({h.language})</span>
                       <span style={{ color: h.scores.readiness > 80 ? "#06d6a0" : "#ff4d6d" }}>
                         Readiness: {h.scores.readiness}% ({h.issues} issues)
