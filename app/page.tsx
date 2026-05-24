@@ -1026,8 +1026,11 @@ export default function Page() {
     }, 600);
   };
 
-  const startReview = useCallback(async () => {
-    if (!code.trim() || reviewing) return;
+  const startReview = useCallback(async (codeOverride?: string, langOverride?: string) => {
+    const activeCode = codeOverride !== undefined ? codeOverride : code;
+    const activeLang = langOverride !== undefined ? langOverride : language;
+    if (!activeCode.trim() || reviewing) return;
+    
     reset();
     setReviewing(true);
 
@@ -1047,7 +1050,7 @@ export default function Page() {
       try {
         const full = await streamFromAPI(
           "/api/review",
-          { code, language, agentType: agent.id },
+          { code: activeCode, language: activeLang, agentType: agent.id },
           (chunk) => {
             setPanels((prev) => {
               const next = { ...prev, [agent.id]: prev[agent.id] + chunk };
@@ -1093,7 +1096,7 @@ export default function Page() {
             performance: results.performance,
             style: results.style,
             compliance: results.compliance,
-            language,
+            language: activeLang,
           },
           (chunk) => {
             setMeta((prev) => {
@@ -1119,13 +1122,13 @@ export default function Page() {
           setFixedCode(parsedFix);
         }
 
-        const finalFindings = runStaticScanner(code);
-        const finalScores = calculateMultiScoring(code, results, finalFindings);
+        const finalFindings = runStaticScanner(activeCode);
+        const finalScores = calculateMultiScoring(activeCode, results, finalFindings);
         const nextScan = {
           id: Date.now(),
           timestamp: new Date().toLocaleTimeString(),
           scores: finalScores,
-          language,
+          language: activeLang,
           issues: finalFindings.length + (finalScores.readiness < 80 ? 2 : 0)
         };
         setHistory(prev => {
@@ -1145,6 +1148,301 @@ export default function Page() {
       setReviewing(false);
     }
   }, [code, language, reviewing, reset]);
+
+  // --- HACKATHON AUTO TOUR ENGINE CONSTANTS ---
+  const vulnerableDemoCode = `import express from "express";
+import fs from "fs";
+
+const app = express();
+
+app.use(express.json());
+
+const API_SECRET = "SUPER_SECRET_TOKEN_123";
+
+app.post("/register", async (req, res) => {
+  const { email, password, cardNumber, cvv } = req.body;
+
+  const query = \`
+    INSERT INTO users(email,password)
+    VALUES('\${email}','\${password}')
+  \`;
+
+  console.log(email, password, cardNumber, cvv);
+
+  fs.writeFileSync(
+    "backup.json",
+    JSON.stringify(req.body)
+  );
+
+  fetch("http://payment-api.local/pay", {
+    method: "POST",
+    body: JSON.stringify({
+      cardNumber,
+      cvv
+    })
+  });
+
+  res.send("done");
+});
+
+app.listen(3000);`;
+
+  const packageJsonCode = `{
+  "dependencies": {
+    "axios": "0.20.0",
+    "lodash": "4.17.15"
+  }
+}`;
+
+  // --- HACKATHON AUTO TOUR STATE ---
+  const [tourUI, setTourUI] = useState({
+    active: false,
+    stage: 0,
+    paused: false,
+    caption: ""
+  });
+
+  const tourStateRef = useRef({
+    active: false,
+    stage: 0,
+    paused: false,
+    timer: null as any
+  });
+
+  const TOUR_STAGES = [
+    {
+      stage: 1,
+      title: "LOAD SOURCE CODE",
+      caption: "Stage 1/9: Initializing vulnerable Express registration router in code buffer.",
+      duration: 6000,
+      action: async (apiUtils: any) => {
+        apiUtils.setViewMode("console");
+        apiUtils.setEditorTab("buffer");
+        apiUtils.setComplianceTab("report");
+        apiUtils.setExpandedPanel(null);
+        apiUtils.setShowDiff(false);
+        apiUtils.reset();
+        apiUtils.setCode(vulnerableDemoCode);
+        apiUtils.setLanguage("javascript");
+        setTimeout(() => {
+          document.getElementById("editor-container")?.scrollIntoView({ behavior: "smooth", block: "center" });
+        }, 100);
+      }
+    },
+    {
+      stage: 2,
+      title: "RUN HEURISTIC ANALYSIS",
+      caption: "Stage 2/9: Triggering static scanner. Instantly flags SQL injection and CVV logging.",
+      duration: 6000,
+      action: async (apiUtils: any) => {
+        apiUtils.setViewMode("console");
+        apiUtils.setEditorTab("buffer");
+        apiUtils.setExpandedPanel(null);
+        apiUtils.setShowDiff(false);
+        apiUtils.startReview(vulnerableDemoCode, "javascript");
+        setTimeout(() => {
+          document.getElementById("heuristics-container")?.scrollIntoView({ behavior: "smooth", block: "center" });
+        }, 300);
+      }
+    },
+    {
+      stage: 3,
+      title: "REVEAL AST STRUCTURAL TREE",
+      caption: "Stage 3/9: Parsing code blocks into Abstract Syntax Tree (AST) to evaluate call paths.",
+      duration: 5000,
+      action: async (apiUtils: any) => {
+        apiUtils.setViewMode("console");
+        apiUtils.setEditorTab("ast");
+        setTimeout(() => {
+          document.getElementById("editor-container")?.scrollIntoView({ behavior: "smooth", block: "center" });
+        }, 100);
+      }
+    },
+    {
+      stage: 4,
+      title: "HIGHLIGHT DATA PRIVACY FLOW",
+      caption: "Stage 4/9: Privacy shield traces unmasked variables dynamically to network interfaces.",
+      duration: 8000,
+      action: async (apiUtils: any) => {
+        apiUtils.setViewMode("console");
+        apiUtils.setExpandedPanel("compliance");
+        apiUtils.setComplianceTab("privacy");
+        setTimeout(() => {
+          document.getElementById("agent-grid-container")?.scrollIntoView({ behavior: "smooth", block: "center" });
+        }, 200);
+      }
+    },
+    {
+      stage: 5,
+      title: "EVALUATE AGENT REPORTS",
+      caption: "Stage 5/9: Security, Performance, and Quality LLM agents analyze structural implications.",
+      duration: 8000,
+      action: async (apiUtils: any) => {
+        apiUtils.setViewMode("console");
+        apiUtils.setExpandedPanel(null);
+        setTimeout(() => {
+          document.getElementById("agent-grid-container")?.scrollIntoView({ behavior: "smooth", block: "center" });
+        }, 100);
+      }
+    },
+    {
+      stage: 6,
+      title: "EXECUTIVE VERDICT SYNTHESIS",
+      caption: "Stage 6/9: Synthesis engine resolves conflict scores and generates ranked risk report.",
+      duration: 7000,
+      action: async (apiUtils: any) => {
+        apiUtils.setViewMode("console");
+        apiUtils.setExpandedPanel(null);
+        setTimeout(() => {
+          document.getElementById("synthesis-container")?.scrollIntoView({ behavior: "smooth", block: "center" });
+        }, 100);
+      }
+    },
+    {
+      stage: 7,
+      title: "GENERATE SECURED REFACTORING",
+      caption: "Stage 7/9: Side-by-side compiler diff demonstrates automatic security mitigation.",
+      duration: 8000,
+      action: async (apiUtils: any) => {
+        apiUtils.setViewMode("console");
+        apiUtils.setShowDiff(true);
+        setTimeout(() => {
+          document.getElementById("refactor-container")?.scrollIntoView({ behavior: "smooth", block: "center" });
+        }, 200);
+      }
+    },
+    {
+      stage: 8,
+      title: "FALSE POSITIVE SUPPRESSION",
+      caption: "Stage 8/9: Verifying precision. Scanning clean code yields zero false flags.",
+      duration: 8000,
+      action: async (apiUtils: any) => {
+        apiUtils.setViewMode("console");
+        apiUtils.setShowDiff(false);
+        apiUtils.setEditorTab("buffer");
+        apiUtils.setExpandedPanel(null);
+        apiUtils.reset();
+        apiUtils.setCode('let name = "Adarsh";\nconsole.log(name);');
+        apiUtils.setLanguage("javascript");
+        apiUtils.startReview('let name = "Adarsh";\nconsole.log(name);', "javascript");
+        setTimeout(() => {
+          document.getElementById("editor-container")?.scrollIntoView({ behavior: "smooth", block: "center" });
+        }, 100);
+      }
+    },
+    {
+      stage: 9,
+      title: "DEPENDENCY SECURITY AUDITING",
+      caption: "Stage 9/9: Parsing package manifest. Audits vulnerable version ranges against CVE indexes.",
+      duration: 8000,
+      action: async (apiUtils: any) => {
+        apiUtils.setViewMode("console");
+        apiUtils.setShowDiff(false);
+        apiUtils.setEditorTab("buffer");
+        apiUtils.setExpandedPanel(null);
+        apiUtils.reset();
+        apiUtils.setCode(packageJsonCode);
+        apiUtils.setLanguage("javascript");
+        apiUtils.startReview(packageJsonCode, "javascript");
+        setTimeout(() => {
+          document.getElementById("heuristics-container")?.scrollIntoView({ behavior: "smooth", block: "center" });
+        }, 100);
+      }
+    }
+  ];
+
+  const updateTour = (updates: Partial<{ active: boolean; stage: number; paused: boolean; caption: string }>) => {
+    if (updates.active !== undefined) tourStateRef.current.active = updates.active;
+    if (updates.stage !== undefined) tourStateRef.current.stage = updates.stage;
+    if (updates.paused !== undefined) tourStateRef.current.paused = updates.paused;
+    setTourUI(prev => ({ ...prev, ...updates }));
+  };
+
+  const exitTour = useCallback(() => {
+    if (tourStateRef.current.timer) {
+      clearTimeout(tourStateRef.current.timer);
+      tourStateRef.current.timer = null;
+    }
+    updateTour({ active: false, stage: 0, paused: false, caption: "" });
+    reset();
+  }, [reset]);
+
+  const goToStage = useCallback((stageNum: number) => {
+    if (stageNum < 1 || stageNum > TOUR_STAGES.length) {
+      exitTour();
+      return;
+    }
+
+    if (tourStateRef.current.timer) {
+      clearTimeout(tourStateRef.current.timer);
+      tourStateRef.current.timer = null;
+    }
+
+    updateTour({ stage: stageNum, caption: TOUR_STAGES[stageNum - 1].caption });
+
+    const currentStage = TOUR_STAGES[stageNum - 1];
+
+    const apiUtils = {
+      setViewMode,
+      setEditorTab,
+      setComplianceTab,
+      setExpandedPanel,
+      setShowDiff,
+      reset,
+      setCode,
+      setLanguage,
+      startReview: (cVal?: string, lVal?: string) => {
+        startReview(cVal, lVal);
+      }
+    };
+
+    currentStage.action(apiUtils);
+
+    if (!tourStateRef.current.paused) {
+      tourStateRef.current.timer = setTimeout(() => {
+        goToStage(stageNum + 1);
+      }, currentStage.duration);
+    }
+  }, [startReview, reset, exitTour]);
+
+  const toggleTourPause = () => {
+    const isPaused = !tourStateRef.current.paused;
+    updateTour({ paused: isPaused });
+
+    if (isPaused) {
+      if (tourStateRef.current.timer) {
+        clearTimeout(tourStateRef.current.timer);
+        tourStateRef.current.timer = null;
+      }
+    } else {
+      const currentStage = TOUR_STAGES[tourStateRef.current.stage - 1];
+      tourStateRef.current.timer = setTimeout(() => {
+        goToStage(tourStateRef.current.stage + 1);
+      }, currentStage.duration);
+    }
+  };
+
+  const nextTourStage = () => {
+    goToStage(tourStateRef.current.stage + 1);
+  };
+
+  const prevTourStage = () => {
+    goToStage(tourStateRef.current.stage - 1);
+  };
+
+  const startHackathonTour = () => {
+    reset();
+    updateTour({ active: true, stage: 1, paused: false, caption: TOUR_STAGES[0].caption });
+    goToStage(1);
+  };
+
+  useEffect(() => {
+    return () => {
+      if (tourStateRef.current.timer) {
+        clearTimeout(tourStateRef.current.timer);
+      }
+    };
+  }, []);
 
   // Keyboard Shortcuts Hook
   useEffect(() => {
@@ -1359,6 +1657,9 @@ export default function Page() {
             <span>[ DEPLOYED: CLOUD_ON ]</span>
           </div>
           <div style={{ display: "flex", gap: 10 }}>
+            <button onClick={startHackathonTour} className="btn-block-outline" style={{ ...styles.btn(false), padding: "8px 18px", fontSize: 9, borderColor: "#ffd900", color: "#ffd900" }}>
+              [ START HACKATHON TOUR ]
+            </button>
             <button onClick={() => setShowArchModal(true)} className="btn-block-outline" style={{ ...styles.btn(false), padding: "8px 18px", fontSize: 9 }}>
               [ RECRUITER SYSTEM GUIDE ]
             </button>
@@ -1386,8 +1687,12 @@ export default function Page() {
 
           <div style={{ display: "flex", gap: 12, justifyContent: "center", marginBottom: 64 }}>
             <button onClick={() => setViewMode("console")} className="btn-block-yellow"
-              style={{ ...styles.btn(true), padding: "16px 48px", fontSize: 11 }}>
+              style={{ ...styles.btn(true), padding: "16px 36px", fontSize: 11 }}>
               [ INGEST SOURCE CODE & EXECUTE AUDIT ]
+            </button>
+            <button onClick={startHackathonTour} className="btn-block-outline"
+              style={{ ...styles.btn(false), padding: "16px 36px", fontSize: 11, borderColor: "#ffd900", color: "#ffd900" }}>
+              [ START HACKATHON TOUR ]
             </button>
           </div>
         </div>
@@ -1633,7 +1938,18 @@ export default function Page() {
           <span style={{ fontSize: 8.5, fontFamily: "'Cousine', monospace", color: "rgba(255,255,255,0.3)" }}>// ENGINE: GEMINI_3.5</span>
         </div>
 
-        <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+        <div style={{ display: "flex", gap: 6, flexWrap: "wrap", alignItems: "center" }}>
+          <button onClick={startHackathonTour} className="btn-block-yellow"
+            style={{
+              ...styles.btn(true),
+              padding: "4px 10px",
+              fontSize: 8,
+              marginRight: 8,
+              height: "fit-content",
+              cursor: "pointer"
+            }}>
+            [ START HACKATHON TOUR ]
+          </button>
           {AGENTS.map((a) => (
             <div key={a.id} style={styles.badge(a.color, status[a.id] !== "idle", status[a.id] === "failed")}>
               {a.icon} {a.name.split(" ")[0].toUpperCase()}
@@ -1688,7 +2004,7 @@ export default function Page() {
           <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
             
             {/* Input Editor Box */}
-            <div style={styles.card}>
+            <div id="editor-container" style={styles.card}>
               <CornerCrosses />
               
               {/* Tab selector between code buffer and AST tree */}
@@ -1752,7 +2068,7 @@ export default function Page() {
               )}
 
               <div style={{ padding: "10px 16px", borderTop: "none", display: "flex", gap: 10, alignItems: "center", background: "#050505" }}>
-                <button onClick={startReview} disabled={!code.trim() || reviewing} className="btn-block-yellow"
+                <button onClick={() => startReview()} disabled={!code.trim() || reviewing} className="btn-block-yellow"
                   style={{ ...styles.btn(true), opacity: !code.trim() || reviewing ? 0.5 : 1, cursor: !code.trim() || reviewing ? "not-allowed" : "pointer" }}>
                   {reviewing ? "[ RUNNING AUDIT PIPELINE... ]" : "[ EXECUTE AGENT MATRIX ]"}
                 </button>
@@ -1767,7 +2083,7 @@ export default function Page() {
 
             {/* Instant Static Scanner Results Panel */}
             {staticFindings.length > 0 && (
-              <div style={{ ...styles.card, padding: 16, background: "#050000", border: "1px solid rgba(255, 77, 109, 0.4)" }}>
+              <div id="heuristics-container" style={{ ...styles.card, padding: 16, background: "#050000", border: "1px solid rgba(255, 77, 109, 0.4)" }}>
                 <CornerCrosses />
                 <div style={{ display: "flex", alignItems: "center",  justifyContent: "space-between", marginBottom: 10 }}>
                   <span style={{ fontSize: 9, color: "#ff4d6d", letterSpacing: "2.5px", fontWeight: 700, fontFamily: "'Cousine', monospace" }}>
@@ -1801,7 +2117,7 @@ export default function Page() {
             )}
 
             {/* Staggered Agent Terminals */}
-            <div style={{ display: "grid", gridTemplateColumns: expandedPanel ? "1fr" : "1fr 1fr", gap: 16 }}>
+            <div id="agent-grid-container" style={{ display: "grid", gridTemplateColumns: expandedPanel ? "1fr" : "1fr 1fr", gap: 16 }}>
               {AGENTS.map((agent) => {
                 const isExpanded = expandedPanel === agent.id;
                 const isFailed = status[agent.id] === "failed";
@@ -1861,7 +2177,7 @@ export default function Page() {
 
             {/* Side-by-Side Diff */}
             {showDiff && fixedCode && (
-              <div style={{ ...styles.card, border: "1px solid #ffd900", marginTop: 16 }}>
+              <div id="refactor-container" style={{ ...styles.card, border: "1px solid #ffd900", marginTop: 16 }}>
                 <CornerCrosses />
                 
                 <div style={{ padding: "10px 16px", borderBottom: "1px solid rgba(255, 217, 0, 0.15)", display: "flex",  justifyContent: "space-between", alignItems: "center", background: "#050505" }}>
@@ -2000,7 +2316,7 @@ export default function Page() {
 
             {/* Meta Synthesizer Verdict */}
             {metaStatus !== "idle" && (
-              <div style={{ ...styles.card, border: `1px solid ${metaStatus === "done" ? "#ffd900" : (metaStatus === "failed" ? "#ff4d6d" : "rgba(255, 217, 0, 0.15)")}`, transition: "border-color 0.5s" }}>
+              <div id="synthesis-container" style={{ ...styles.card, border: `1px solid ${metaStatus === "done" ? "#ffd900" : (metaStatus === "failed" ? "#ff4d6d" : "rgba(255, 217, 0, 0.15)")}`, transition: "border-color 0.5s" }}>
                 <CornerCrosses />
                 
                 <div style={{ padding: "10px 16px", borderBottom: "1px solid rgba(255, 217, 0, 0.12)", display: "flex", alignItems: "center", gap: 10, background: "#050505" }}>
@@ -2073,6 +2389,123 @@ export default function Page() {
           ● PIPELINE STATUS: {reviewing ? "PARALLEL LLM AGENTS RUNNING..." : "HYBRID HEURISTICS & REASONING ONLINE"}
         </span>
       </div>
+      {/* Floating Tour Controls Overlay */}
+      {tourUI.active && (
+        <div style={{
+          position: "fixed",
+          bottom: 24,
+          left: "50%",
+          transform: "translateX(-50%)",
+          width: "90%",
+          maxWidth: 720,
+          background: "#000000ec",
+          border: "1px solid #ffd900",
+          boxShadow: "0 10px 30px rgba(255, 217, 0, 0.25)",
+          backdropFilter: "blur(8px)",
+          padding: "12px 24px",
+          display: "flex",
+          flexDirection: "column",
+          gap: 8,
+          zIndex: 99999,
+          fontFamily: "'Cousine', monospace",
+          boxSizing: "border-box",
+        }}>
+          <CornerCrosses />
+          
+          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: 12 }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+              <span style={{ display: "inline-block", width: 6, height: 6, background: "#ffd900", animation: "blink 1s step-end infinite" }} />
+              <span style={{ fontSize: 10, fontWeight: 800, color: "#ffd900", letterSpacing: "1.5px" }}>
+                [ TOUR MODE ACTIVE — STAGE {tourUI.stage}/9 ]
+              </span>
+            </div>
+
+            <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+              <button onClick={prevTourStage} disabled={tourUI.stage <= 1}
+                style={{
+                  background: "none",
+                  border: "1px solid rgba(255, 255, 255, 0.15)",
+                  color: tourUI.stage <= 1 ? "rgba(255, 255, 255, 0.25)" : "#ffffff",
+                  padding: "4px 10px",
+                  fontSize: 9,
+                  cursor: tourUI.stage <= 1 ? "not-allowed" : "pointer",
+                  fontFamily: "'Cousine', monospace"
+                }}>
+                [ ◀ BACK ]
+              </button>
+
+              <button onClick={toggleTourPause}
+                style={{
+                  background: "none",
+                  border: "1px solid #ffd900",
+                  color: "#ffd900",
+                  padding: "4px 12px",
+                  fontSize: 9,
+                  cursor: "pointer",
+                  fontWeight: 800,
+                  fontFamily: "'Cousine', monospace"
+                }}>
+                {tourUI.paused ? "[ ▶ PLAY ]" : "[ ❚❚ PAUSE ]"}
+              </button>
+
+              <button onClick={nextTourStage} disabled={tourUI.stage >= 9}
+                style={{
+                  background: "none",
+                  border: "1px solid rgba(255, 255, 255, 0.15)",
+                  color: tourUI.stage >= 9 ? "rgba(255, 255, 255, 0.25)" : "#ffffff",
+                  padding: "4px 10px",
+                  fontSize: 9,
+                  cursor: tourUI.stage >= 9 ? "not-allowed" : "pointer",
+                  fontFamily: "'Cousine', monospace"
+                }}>
+                {tourUI.stage >= 9 ? "[ ▶▶ END ]" : "[ ▶▶ NEXT ]"}
+              </button>
+
+              <span style={{ color: "rgba(255, 255, 255, 0.15)" }}>|</span>
+
+              <button onClick={exitTour}
+                style={{
+                  background: "#ff4d6d",
+                  border: "none",
+                  color: "#ffffff",
+                  padding: "4px 10px",
+                  fontSize: 9,
+                  cursor: "pointer",
+                  fontFamily: "'Cousine', monospace",
+                  fontWeight: 700
+                }}>
+                [ ✕ EXIT ]
+              </button>
+            </div>
+          </div>
+
+          <div style={{ display: "flex", gap: 4, height: 3, background: "rgba(255, 255, 255, 0.05)", marginTop: 2 }}>
+            {Array.from({ length: 9 }).map((_, i) => {
+              const isCurrent = tourUI.stage === i + 1;
+              const isPassed = tourUI.stage > i + 1;
+              return (
+                <div key={i} style={{
+                  flex: 1,
+                  background: isCurrent ? "#ffd900" : isPassed ? "#06d6a0" : "rgba(255, 255, 255, 0.1)",
+                  transition: "background-color 0.3s ease"
+                }} />
+              );
+            })}
+          </div>
+
+          <div style={{
+            fontSize: 9.5,
+            color: "#ffffff",
+            lineHeight: 1.5,
+            marginTop: 4,
+            fontFamily: "'Cousine', monospace",
+            letterSpacing: "0.2px"
+          }}>
+            <span style={{ color: "#ffd900" }}>SYSTEM: </span>
+            {tourUI.caption}
+          </div>
+        </div>
+      )}
     </div>
   );
 }
